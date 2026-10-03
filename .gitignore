@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local config and secrets (config.example.toml is committed)
+config.toml
+*.local.toml
+.env
+
+# Data files
+*.zst
+*.ndjson
+*.part
+data/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
