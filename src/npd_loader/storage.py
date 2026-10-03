@@ -24,8 +24,11 @@ class LocalStorage:
 
     def _path(self, rel_path: str) -> Path:
         posix = PurePosixPath(rel_path)
-        if not rel_path or posix.is_absolute() or rel_path.startswith("\\") or ".." in posix.parts:
+        if not rel_path or posix.is_absolute() or "\\" in rel_path or ".." in posix.parts:
             raise ValueError(f"unsafe storage path: {rel_path!r}")
+        for part in posix.parts:
+            if ":" in part:
+                raise ValueError(f"unsafe storage path: {rel_path!r}")
         return self.root.joinpath(*posix.parts)
 
     def open_write(self, rel_path: str) -> BinaryIO:

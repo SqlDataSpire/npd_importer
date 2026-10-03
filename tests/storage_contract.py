@@ -47,7 +47,7 @@ class StorageContract:
         assert storage.list("run_1/") == ["run_1/a", "run_1/z"]
         assert storage.list("") == ["other/c", "run_1/a", "run_1/z", "run_2/b"]
 
-    @pytest.mark.parametrize("bad", ["../escape", "/abs/path", "a/../../b", ""])
+    @pytest.mark.parametrize("bad", ["../escape", "/abs/path", "a/../../b", "", "C:\\Windows\\x", "D:/evil/path", "a\\b"])
     def test_rejects_unsafe_paths(self, storage, bad):
         with pytest.raises(ValueError):
             storage.exists(bad)
