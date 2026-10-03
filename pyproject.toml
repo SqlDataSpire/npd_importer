@@ -28,3 +28,4 @@ npd_loader = ["sql/init/*.sql", "sql/transform/*.sql", "sql/mapped_paths.txt"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-rs"
+pythonpath = ["tests"]
