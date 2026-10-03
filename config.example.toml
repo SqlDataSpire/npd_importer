@@ -1,0 +1,39 @@
+# Copy to /etc/npd-loader/config.toml (mode 600). Never commit the real file.
+
+[source]
+manifest_url = "https://directory.cms.gov/downloads/manifest.json"
+
+[storage]
+backend = "local"
+root = "/data/npd"            # npd_data_folder
+
+[credentials]
+backend = "config"
+
+[npd_db]
+host = "192.10.0.6"
+port = 5432
+dbname = "npd"
+user = "..."
+password = "..."
+raw_schema = "npd_raw"
+schema = "npd"
+
+[catalog]
+backend = "css_catalog_pg"
+host = "192.10.0.6"
+port = 5432
+dbname = "css_catalog_local"
+user = "..."
+password = "..."
+project = "NPD"
+run_type = "National Provider Directory"
+file_set = "NPD_FHIR"
+
+[download]
+max_attempts = 8
+backoff_seconds = 5
+timeout_seconds = 60
+
+[retention]
+keep_releases = 5
