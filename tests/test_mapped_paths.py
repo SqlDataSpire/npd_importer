@@ -3,7 +3,7 @@ import pytest
 from npd_loader.profile import load_mapped_paths, profile_records, unmapped
 from fixture_data import all_records
 
-COVERED_TYPES = ["Practitioner"]
+COVERED_TYPES = ["Practitioner", "Organization", "Location", "Endpoint"]
 
 
 @pytest.mark.parametrize("rtype", COVERED_TYPES)

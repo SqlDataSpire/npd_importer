@@ -52,3 +52,62 @@ Practitioner .qualification[].issuer.reference
 Practitioner .qualification[].identifier[].type.coding[].system
 Practitioner .qualification[].identifier[].type.coding[].display
 Practitioner .qualification[].identifier[].use
+
+# Organization (020_organization.sql)
+Organization .active
+Organization .name
+Organization .type[].coding[].code
+Organization .type[].coding[].display
+Organization .partOf.reference
+Organization .endpoint[].reference
+Organization .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-verification-status].valueCodeableConcept.coding[].code
+Organization .address[].use
+Organization .address[].type
+Organization .address[].line[]
+Organization .address[].city
+Organization .address[].state
+Organization .address[].postalCode
+Organization .address[].country
+Organization .telecom[].system
+Organization .telecom[].use
+Organization .telecom[].value
+# raw-only
+Organization .type[].coding[].system
+Organization .type[].text
+Organization .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-verification-status].valueCodeableConcept.coding[].system
+Organization .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-verification-status].valueCodeableConcept.coding[].display
+
+# Location (030_location.sql)
+Location .status
+Location .name
+Location .description
+Location .mode
+Location .address.use
+Location .address.type
+Location .address.line[]
+Location .address.city
+Location .address.state
+Location .address.postalCode
+Location .address.country
+Location .position.latitude
+Location .position.longitude
+Location .managingOrganization.reference
+Location .telecom[].system
+Location .telecom[].use
+Location .telecom[].value
+
+# Endpoint (040_endpoint.sql)
+Endpoint .status
+Endpoint .name
+Endpoint .address
+Endpoint .connectionType.system
+Endpoint .connectionType.code
+Endpoint .payloadType[].coding[].system
+Endpoint .payloadType[].coding[].code
+Endpoint .managingOrganization.reference
+Endpoint .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-verification-status].valueCodeableConcept.coding[].code
+# raw-only
+Endpoint .connectionType.display
+Endpoint .payloadType[].coding[].version
+Endpoint .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-verification-status].valueCodeableConcept.coding[].system
+Endpoint .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-verification-status].valueCodeableConcept.coding[].display
