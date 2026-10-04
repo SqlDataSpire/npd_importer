@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import psycopg
 import pytest
 
-from npd_loader.raw_load import RawLoadError, iter_lines, load_raw
+from npd_loader.raw_load import NdjsonInput, RawLoadError, iter_lines, load_raw
 from npd_loader.storage import LocalStorage
 from fixture_data import ORG1, PRAC1, PRAC2, ndjson_bytes
 from pg_helpers import R, load_fixture_raw, write_inputs
@@ -81,3 +81,12 @@ def test_unknown_resource_type_loads_raw(npd_db, storage):
         assert result.rows == {"Medication": 1, "Practitioner": 1}
         assert conn.execute("SELECT resource_id FROM npd_raw.resource__20260929__r7 "
                             "WHERE resource_type = 'Medication'").fetchone()[0] == "Medication-1"
+
+
+def test_unreadable_file_reports_raw_load_error(npd_db, storage):
+    inp = NdjsonInput(file_id=900, zst_file_id=901, rel_path="run_1/missing-06-Practitioner.ndjson",
+                      resource_type="Practitioner", name="06-Practitioner.ndjson")
+    with psycopg.connect(npd_db) as conn:
+        with pytest.raises(RawLoadError, match="06-Practitioner.ndjson: cannot read") as info:
+            load_raw(conn, storage, "npd_raw", R, 7, [inp])
+    assert info.value.file_id == 900

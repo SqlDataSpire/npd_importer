@@ -114,8 +114,12 @@ def _load_file(conn: psycopg.Connection, storage: Storage, raw_schema: str, tabl
     except psycopg.Error as exc:
         conn.rollback()
         raise RawLoadError(f"{inp.name}: COPY failed: {exc}", inp.file_id) from exc
+    except OSError as exc:
+        conn.rollback()
+        raise RawLoadError(f"{inp.name}: cannot read {inp.rel_path}: {exc}", inp.file_id) from exc
     count = conn.execute(sql.SQL("SELECT count(*) FROM {}").format(leaf_id)).fetchone()[0]
     if count != lines:
+        conn.rollback()
         raise RawLoadError(f"{inp.name}: read {lines} lines but loaded {count} rows", inp.file_id)
     conn.execute(sql.SQL("ALTER TABLE {} ATTACH PARTITION {} FOR VALUES IN ({})").format(
         sql.Identifier(raw_schema, table), leaf_id, sql.Literal(inp.resource_type)))
