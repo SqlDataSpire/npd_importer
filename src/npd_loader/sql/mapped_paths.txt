@@ -4,3 +4,51 @@
 * .id
 * .resourceType
 * .meta.lastUpdated
+
+# identifier (090_identifier.sql), all resource types
+* .identifier[].system
+* .identifier[].value
+* .identifier[].use
+* .identifier[].type.coding[].code
+* .identifier[].type.text
+* .identifier[].period.start
+* .identifier[].period.end
+# raw-only
+* .identifier[].type.coding[].system
+* .identifier[].type.coding[].display
+
+# Practitioner (010_practitioner.sql)
+Practitioner .active
+Practitioner .gender
+Practitioner .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-cms-identity-verified].valueBoolean
+Practitioner .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-cms_medicare_enrollment].valueBoolean
+Practitioner .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-hhs-in-exclusion-list].valueBoolean
+Practitioner .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-cms_aligned_with_data_network].valueBoolean
+Practitioner .name[].use
+Practitioner .name[].family
+Practitioner .name[].given[]
+Practitioner .name[].prefix[]
+Practitioner .name[].suffix[]
+Practitioner .name[].period.start
+Practitioner .name[].period.end
+Practitioner .address[].use
+Practitioner .address[].type
+Practitioner .address[].line[]
+Practitioner .address[].city
+Practitioner .address[].state
+Practitioner .address[].postalCode
+Practitioner .address[].country
+Practitioner .telecom[].system
+Practitioner .telecom[].use
+Practitioner .telecom[].value
+Practitioner .qualification[].code.coding[].system
+Practitioner .qualification[].code.coding[].code
+Practitioner .qualification[].code.coding[].display
+Practitioner .qualification[].code.text
+Practitioner .qualification[].identifier[].value
+Practitioner .qualification[].identifier[].type.coding[].code
+Practitioner .qualification[].issuer.reference
+# raw-only
+Practitioner .qualification[].identifier[].type.coding[].system
+Practitioner .qualification[].identifier[].type.coding[].display
+Practitioner .qualification[].identifier[].use
