@@ -111,3 +111,51 @@ Endpoint .connectionType.display
 Endpoint .payloadType[].coding[].version
 Endpoint .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-verification-status].valueCodeableConcept.coding[].system
 Endpoint .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-verification-status].valueCodeableConcept.coding[].display
+
+# PractitionerRole (050_practitioner_role.sql)
+PractitionerRole .active
+PractitionerRole .practitioner.reference
+PractitionerRole .organization.reference
+PractitionerRole .period.start
+PractitionerRole .period.end
+PractitionerRole .endpoint[].reference
+PractitionerRole .location[].reference
+PractitionerRole .specialty[].coding[].system
+PractitionerRole .specialty[].coding[].code
+PractitionerRole .specialty[].coding[].display
+PractitionerRole .specialty[].text
+PractitionerRole .code[].coding[].system
+PractitionerRole .code[].coding[].code
+PractitionerRole .code[].coding[].display
+PractitionerRole .code[].text
+
+# OrganizationAffiliation (060_organization_affiliation.sql)
+OrganizationAffiliation .active
+OrganizationAffiliation .organization.reference
+OrganizationAffiliation .participatingOrganization.reference
+OrganizationAffiliation .code[].coding[].code
+OrganizationAffiliation .code[].coding[].display
+OrganizationAffiliation .code[].text
+OrganizationAffiliation .period.start
+OrganizationAffiliation .period.end
+# raw-only
+OrganizationAffiliation .code[].coding[].system
+
+# HealthcareService (070_healthcare_service.sql)
+HealthcareService .active
+HealthcareService .name
+HealthcareService .providedBy.reference
+HealthcareService .location[].reference
+HealthcareService .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-network-reference].valueReference.reference
+
+# InsurancePlan (080_insurance_plan.sql)
+InsurancePlan .status
+InsurancePlan .name
+InsurancePlan .type[].coding[].code
+InsurancePlan .type[].text
+InsurancePlan .period.start
+InsurancePlan .period.end
+InsurancePlan .ownedBy.reference
+InsurancePlan .administeredBy.reference
+InsurancePlan .alias[]
+InsurancePlan .network[].reference
