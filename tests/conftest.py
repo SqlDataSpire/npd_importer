@@ -71,3 +71,11 @@ def catalog_db(make_db) -> str:
     with psycopg.connect(info, autocommit=True) as conn:
         conn.execute((TESTS / "sql" / "css_catalog_schema.sql").read_text())
     return info
+
+
+@pytest.fixture
+def cms():
+    from fake_cms import FakeCms
+    server = FakeCms().start()
+    yield server
+    server.stop()
