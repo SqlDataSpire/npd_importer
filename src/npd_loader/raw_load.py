@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import BinaryIO, Iterator
@@ -22,6 +23,9 @@ log = logging.getLogger(__name__)
 RAW_PARENT = "resource"
 COLUMNS = ("release_date", "resource_type", "resource_id", "last_updated", "ndjson_file_id", "zst_file_id",
            "line_number", "resource")
+# A \u0000 escape in JSON text: "u0000" after an odd number of backslashes. After an even number it is just
+# escaped backslashes followed by the text "u0000", which jsonb stores fine.
+NUL_ESCAPE_RE = re.compile(r"(?<!\\)(?:\\\\)*\\u0000")
 
 
 class RawLoadError(Exception):
@@ -63,7 +67,7 @@ def iter_lines(f: BinaryIO) -> Iterator[tuple[int, str]]:
 
 
 def validate_line(text: str, number: int, expected_type: str) -> tuple[str, str | None]:
-    if "\\u0000" in text:
+    if NUL_ESCAPE_RE.search(text):
         raise RawLoadError(f"line {number}: contains \\u0000, which Postgres jsonb cannot store")
     try:
         obj = json.loads(text)

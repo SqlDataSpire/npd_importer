@@ -57,6 +57,7 @@ def test_iter_lines_blank_lines():
     ([json.dumps({**PRAC1, "id": ""})], "line 1: missing id"),
     ([json.dumps(PRAC1), json.dumps(PRAC1)], "duplicate"),
     ([json.dumps({**PRAC1, "gender": "x\u0000y"})], "line 1: contains \\\\u0000"),
+    ([json.dumps({**PRAC1, "gender": "x\\\u0000y"})], "line 1: contains \\\\u0000"),  # backslash, then NUL
 ])
 def test_strict_validation(npd_db, storage, lines, message):
     data = ("\n".join(lines) + "\n").encode()
@@ -64,6 +65,16 @@ def test_strict_validation(npd_db, storage, lines, message):
         with pytest.raises(RawLoadError, match=message) as info:
             load_fixture_raw(conn, storage, {"06-Practitioner.ndjson": data})
     assert info.value.file_id is not None or "duplicate" in message
+
+
+def test_escaped_backslash_before_u0000_loads(npd_db, storage):
+    prac = {**PRAC1, "gender": "x\\u0000y"}  # a literal backslash followed by the text "u0000", no NUL
+    assert r"x\\u0000y" in json.dumps(prac)
+    with psycopg.connect(npd_db) as conn:
+        result = load_fixture_raw(conn, storage, {"06-Practitioner.ndjson": ndjson_bytes([prac])})
+        assert result.rows == {"Practitioner": 1}
+        gender = conn.execute("SELECT resource->>'gender' FROM npd_raw.resource__20260929__r7").fetchone()[0]
+    assert gender == "x\\u0000y"
 
 
 def test_duplicate_error_names_the_id(npd_db, storage):
