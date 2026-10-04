@@ -79,3 +79,11 @@ def cms():
     server = FakeCms().start()
     yield server
     server.stop()
+
+
+@pytest.fixture
+def npd_db(make_db) -> str:
+    from npd_loader.schema import init_db
+    info = make_db()
+    init_db(info, "npd_raw", "npd")
+    return info
