@@ -83,6 +83,22 @@ def _profile(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run(ctx: Context) -> int:
+    """Download, then import even if the download failed (an earlier download may still need importing).
+    Exit 1 if either stage failed."""
+    failed = False
+    for name, stage in (("download", run_download), ("import", run_import)):
+        try:
+            log.info("run: %s: %s", name, stage(ctx))
+        except StageFailed as exc:
+            log.error("run: %s failed: %s", name, exc)
+            failed = True
+        except Exception:
+            log.exception("run: %s failed with an unexpected error", name)
+            failed = True
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, stream=sys.stderr,
@@ -104,8 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "import":
                 outcome = run_import(ctx, release=args.release, force=args.force)
             elif args.command == "run":
-                run_download(ctx)
-                outcome = run_import(ctx)
+                return _run(ctx)
             else:  # status
                 print(format_status(ctx.catalog, config.catalog,
                                     published_releases(ctx.npd_conninfo, config.npd_db.schema)))

@@ -2,6 +2,7 @@ import json
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
 import zstandard
 
 from npd_loader import cli
@@ -57,6 +58,29 @@ def test_run_is_download_then_import(monkeypatch, tmp_path):
     fake_context(monkeypatch, tmp_path, calls, {})
     assert cli.main(["--config", "x", "run"]) == 0
     assert [c[0] for c in calls[:-1]] == ["download", "import"] and calls[-1] == "close"
+
+
+@pytest.mark.parametrize("download_error", [StageFailed("download broke"), RuntimeError("download crashed")])
+def test_run_imports_even_if_download_fails(monkeypatch, tmp_path, caplog, download_error):
+    calls = []
+    fake_context(monkeypatch, tmp_path, calls, {"download": download_error})
+    assert cli.main(["--config", "x", "run"]) == 1
+    assert [c[0] for c in calls[:-1]] == ["download", "import"] and calls[-1] == "close"
+    assert "download crashed" in caplog.text or "download broke" in caplog.text
+
+
+def test_run_reports_both_failures(monkeypatch, tmp_path, caplog):
+    calls = []
+    fake_context(monkeypatch, tmp_path, calls, {"download": StageFailed("download broke"),
+                                                "import": StageFailed("import broke")})
+    assert cli.main(["--config", "x", "run"]) == 1
+    assert "download broke" in caplog.text and "import broke" in caplog.text
+
+
+def test_run_fails_if_only_import_fails(monkeypatch, tmp_path):
+    calls = []
+    fake_context(monkeypatch, tmp_path, calls, {"import": StageFailed("import broke")})
+    assert cli.main(["--config", "x", "run"]) == 1
 
 
 def test_options_are_passed(monkeypatch, tmp_path):
