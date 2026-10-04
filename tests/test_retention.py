@@ -27,8 +27,8 @@ def publish_empty(conn, release: date, run_id: int) -> None:
     conn.commit()
 
 
-def seed(ctx, release: date) -> tuple[str, str]:
-    run = ctx.catalog.add_successful_run("IMPORT", release)
+def seed(ctx, release: date, run_class: str = "IMPORT") -> tuple[str, str]:
+    run = ctx.catalog.add_successful_run(run_class, release)
     zst_rel = f"run_1_{release}/file_1_06-Practitioner.ndjson.zst"
     nd_rel = f"run_2_{release}/file_2_06-Practitioner.ndjson"
     zst = ctx.catalog.add_data_file(run, file_type="ndjson.zst", source_version_num=release.isoformat(),
@@ -124,3 +124,25 @@ def test_locked_parent_gives_up_with_a_warning(ctx):
     assert all(ctx.storage.exists(ctx.paths[r][1]) for r in RELEASES)
     assert apply_retention(ctx, RELEASES[-1]) == []      # retried on the next run
     assert published(ctx) == RELEASES[2:]
+
+
+def test_catalog_only_import_does_not_take_a_keep_slot(ctx):
+    newer = RELEASES[-1] + timedelta(weeks=1)        # "imported" per the catalog but not published in this DB
+    _, newer_nd = seed(ctx, newer)
+    assert apply_retention(ctx, RELEASES[-1]) == []
+    assert published(ctx) == RELEASES[2:]            # ranked over published + just imported only
+    assert ctx.storage.exists(newer_nd)              # newer than every kept release
+
+
+def test_ndjson_of_extracted_but_never_imported_releases_is_deleted(ctx):
+    old = BASE - timedelta(weeks=1)
+    between = RELEASES[1] + timedelta(days=3)        # older than the oldest kept release (RELEASES[2])
+    newer = RELEASES[-1] + timedelta(weeks=1)        # extracted, import still to come
+    paths = {r: seed(ctx, r, run_class="EXTRACT") for r in (old, between, newer)}
+    files_before = len(ctx.catalog.files)
+    assert apply_retention(ctx, RELEASES[-1]) == []
+    assert published(ctx) == RELEASES[2:]
+    for release, (zst_rel, nd_rel) in paths.items():
+        assert ctx.storage.exists(zst_rel)                         # .zst never deleted
+        assert ctx.storage.exists(nd_rel) == (release == newer)
+    assert len(ctx.catalog.files) == files_before

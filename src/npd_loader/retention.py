@@ -1,5 +1,5 @@
-"""Keep the newest N imported releases: drop older partitions and their .ndjson files.
-Never touches the release just imported, .zst/manifest files, or catalog rows."""
+"""Keep the newest N published releases: drop older partitions and their .ndjson files, and the .ndjson files of
+extracted-but-unpublished releases older than every kept release. Never touches the release just imported, .zst/manifest files, or catalog rows."""
 from __future__ import annotations
 
 import logging
@@ -34,10 +34,16 @@ def apply_retention(ctx: Context, just_imported: date) -> list[str]:
             for schema in (db.raw_schema, db.schema):
                 for parent in list_parent_tables(conn, schema):
                     published |= set(list_release_partitions(conn, schema, parent))
-            imported = set(ctx.catalog.successful_releases(cfg.catalog.run_class_import)) | published | {just_imported}
-            keep = set(sorted(imported, reverse=True)[:cfg.retention.keep_releases]) | {just_imported}
+            # Keep slots go to releases published in this database (plus the one just imported) only.
+            newest = sorted(published | {just_imported}, reverse=True)[:cfg.retention.keep_releases]
+            keep = set(newest) | {just_imported}
+            # .ndjson only: releases extracted (or imported per the catalog) but not published here, older than
+            # the oldest kept release, e.g. an extract whose import failed and was never retried.
+            extracted = set(ctx.catalog.successful_releases(cfg.catalog.run_class_extract)) \
+                | set(ctx.catalog.successful_releases(cfg.catalog.run_class_import))
+            unpublished = {r for r in extracted - published - keep if r < min(newest)}
             locked_out = False
-            for release in sorted(imported - keep):
+            for release in sorted((published - keep) | unpublished):
                 try:
                     if release in published:
                         if locked_out:  # the same parents are still locked; don't wait out the timeout again
