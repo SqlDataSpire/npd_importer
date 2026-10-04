@@ -51,6 +51,18 @@ def test_defaults_for_optional_sections_and_labels():
     assert cfg.retention.keep_releases == 5
 
 
+def test_lock_timeout_default_and_override():
+    assert parse_config(minimal()).npd_db.lock_timeout_seconds == 30.0
+    assert load_config(EXAMPLE).npd_db.lock_timeout_seconds == 30.0
+    data = minimal()
+    data["npd_db"]["lock_timeout_seconds"] = 2
+    assert parse_config(data).npd_db.lock_timeout_seconds == 2.0
+    for bad in ("soon", 0):
+        data["npd_db"]["lock_timeout_seconds"] = bad
+        with pytest.raises(ConfigError, match="lock_timeout_seconds"):
+            parse_config(data)
+
+
 def test_missing_section_is_named():
     data = minimal()
     del data["source"]

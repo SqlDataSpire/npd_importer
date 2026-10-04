@@ -18,6 +18,7 @@ user = "..."
 password = "..."
 raw_schema = "npd_raw"
 schema = "npd"
+lock_timeout_seconds = 30     # publish/retention give up waiting for a table lock after this (3 attempts)
 
 [catalog]
 backend = "css_catalog_pg"

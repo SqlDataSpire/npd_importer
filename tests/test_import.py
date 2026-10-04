@@ -1,3 +1,5 @@
+import time
+from dataclasses import replace
 from datetime import date
 
 import psycopg
@@ -67,6 +69,29 @@ def test_force_replaces_the_release(ctx):
     assert one(ctx.npd_conninfo, "SELECT import_run_id FROM npd.release") == second
     assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd_raw.resource") == 12
     assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd.v_practitioner") == 2
+
+
+def test_force_gives_up_on_a_locked_parent(ctx):
+    run_import(ctx)
+    first = max(ctx.catalog.runs)
+    ctx.config = replace(ctx.config, npd_db=replace(ctx.config.npd_db, lock_timeout_seconds=1))
+    sleeps = []
+    ctx.sleep = sleeps.append
+    with psycopg.connect(ctx.npd_conninfo) as other:
+        other.execute("LOCK TABLE npd.practitioner IN ACCESS SHARE MODE")  # a long analyst query
+        start = time.monotonic()
+        with pytest.raises(StageFailed, match="lock timeout"):
+            run_import(ctx, force=True)
+        assert time.monotonic() - start < 15
+        other.rollback()
+    assert len(sleeps) == 2
+    assert ctx.catalog.runs[max(ctx.catalog.runs)]["status"] == FAILED
+    with psycopg.connect(ctx.npd_conninfo) as conn:
+        assert list_release_partitions(conn, "npd", "practitioner") == {R: f"practitioner__20260929__r{first}"}
+        assert list_release_partitions(conn, "npd_raw", "resource") == {R: f"resource__20260929__r{first}"}
+    assert one(ctx.npd_conninfo, "SELECT count(*) FROM pg_class WHERE relname ~ '__r[0-9]+' "
+                                 "AND NOT relispartition") == 0
+    assert one(ctx.npd_conninfo, "SELECT import_run_id FROM npd.release") == first
 
 
 def test_bad_data_fails_cleanly(tmp_path, cms, npd_db):

@@ -1,3 +1,6 @@
+import time
+from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, timedelta
 
 import psycopg
@@ -90,4 +93,34 @@ def test_errors_become_warnings(ctx, monkeypatch):
     monkeypatch.setattr(ctx.storage, "delete", broken)
     warnings = apply_retention(ctx, RELEASES[-1])
     assert len(warnings) == 2 and all("disk unavailable" in w for w in warnings)
+    assert published(ctx) == RELEASES[2:]
+
+
+@contextmanager
+def lock_held(conninfo: str, table: str):
+    """Another session (e.g. a long analyst query) holding ACCESS SHARE on `table` until the block ends."""
+    with psycopg.connect(conninfo) as other:
+        other.execute(f"LOCK TABLE {table} IN ACCESS SHARE MODE")
+        yield
+        other.rollback()
+
+
+def set_lock_timeout(ctx, seconds: float) -> None:
+    ctx.config = replace(ctx.config, npd_db=replace(ctx.config.npd_db, lock_timeout_seconds=seconds))
+
+
+def test_locked_parent_gives_up_with_a_warning(ctx):
+    set_lock_timeout(ctx, 1)
+    sleeps = []
+    ctx.sleep = sleeps.append
+    with lock_held(ctx.npd_conninfo, "npd.practitioner"):
+        start = time.monotonic()
+        warnings = apply_retention(ctx, RELEASES[-1])
+        elapsed = time.monotonic() - start
+    assert elapsed < 6                                   # 3 attempts x 1s, then the other release is skipped
+    assert len(sleeps) == 2                              # retried twice, with backoff, for the first release only
+    assert warnings and all("lock" in w for w in warnings)
+    assert published(ctx) == RELEASES                    # nothing detached, npd_raw included (rolled back)
+    assert all(ctx.storage.exists(ctx.paths[r][1]) for r in RELEASES)
+    assert apply_retention(ctx, RELEASES[-1]) == []      # retried on the next run
     assert published(ctx) == RELEASES[2:]

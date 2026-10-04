@@ -64,7 +64,8 @@ def _import(ctx: Context, run: Run, release: date, inputs: list[NdjsonInput], fo
                                   f"but the catalog has no successful import; rerun with --force to replace it")
         raw = load_raw(conn, ctx.storage, db.raw_schema, release, run.id, inputs)
         transformed = run_transforms(conn, db.raw_schema, raw.table, db.schema, release, run.id)
-        publish_release(conn, db.raw_schema, raw.table, db.schema, transformed.tables, release, run.id, force)
+        publish_release(conn, db.raw_schema, raw.table, db.schema, transformed.tables, release, run.id, force,
+                        db.lock_timeout_seconds, ctx.sleep)
     return ([{"table": f"{db.raw_schema}.{RAW_PARENT}", "resource_type": t, "rows": n} for t, n in raw.rows.items()]
             + [{"table": f"{db.schema}.{t}", "rows": n} for t, n in transformed.counts.items()])
 

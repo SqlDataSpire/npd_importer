@@ -36,6 +36,7 @@ class NpdDbConfig:
     password: str | None
     raw_schema: str
     schema: str
+    lock_timeout_seconds: float = 30.0   # how long publish/retention DDL waits for a parent table lock
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,7 @@ def parse_config(data: dict[str, Any]) -> Config:
             password=npd.get("password"),
             raw_schema=npd.get("raw_schema", "npd_raw"),
             schema=npd.get("schema", "npd"),
+            **_optional({k: v for k, v in npd.items() if k == "lock_timeout_seconds"}, "npd_db", NpdDbConfig),
         ),
         catalog=CatalogConfig(
             backend=_backend(cat, "catalog", CATALOG_BACKENDS),
@@ -181,6 +183,8 @@ def parse_config(data: dict[str, Any]) -> Config:
         download=DownloadConfig(**_optional(dl, "download", DownloadConfig)),
         retention=RetentionConfig(**_optional(ret, "retention", RetentionConfig)),
     )
+    if config.npd_db.lock_timeout_seconds <= 0:
+        raise ConfigError("[npd_db] lock_timeout_seconds must be greater than 0")
     if config.retention.keep_releases < 1:
         raise ConfigError("[retention] keep_releases must be at least 1")
     if config.download.max_attempts < 1:

@@ -36,12 +36,23 @@ def apply_retention(ctx: Context, just_imported: date) -> list[str]:
                     published |= set(list_release_partitions(conn, schema, parent))
             imported = set(ctx.catalog.successful_releases(cfg.catalog.run_class_import)) | published | {just_imported}
             keep = set(sorted(imported, reverse=True)[:cfg.retention.keep_releases]) | {just_imported}
+            locked_out = False
             for release in sorted(imported - keep):
                 try:
                     if release in published:
-                        dropped = drop_release(conn, db.raw_schema, db.schema, release)
+                        if locked_out:  # the same parents are still locked; don't wait out the timeout again
+                            warnings.append(f"retention of release {release}: skipped, a table lock was not "
+                                            f"available (retried on the next run)")
+                            continue
+                        dropped = drop_release(conn, db.raw_schema, db.schema, release, db.lock_timeout_seconds,
+                                               ctx.sleep)
                         log.info("retention dropped %d partitions of release %s", len(dropped), release)
                     _delete_ndjson(ctx, release)
+                except psycopg.errors.LockNotAvailable as exc:
+                    conn.rollback()
+                    locked_out = True
+                    warnings.append(f"retention of release {release}: gave up waiting for a table lock "
+                                    f"({str(exc).strip()}); retried on the next run")
                 except Exception as exc:
                     conn.rollback()
                     warnings.append(f"retention of release {release}: {exc}")
