@@ -94,6 +94,27 @@ def test_force_gives_up_on_a_locked_parent(ctx):
     assert one(ctx.npd_conninfo, "SELECT import_run_id FROM npd.release") == first
 
 
+def test_orphans_of_a_killed_import_are_dropped(ctx, caplog):
+    run_import(ctx)
+    first = max(ctx.catalog.runs)
+    with psycopg.connect(ctx.npd_conninfo) as conn:   # what SIGKILL mid-import leaves behind
+        conn.execute("CREATE TABLE npd.practitioner__20260101__r999 (LIKE npd.practitioner)")
+        conn.execute("CREATE TABLE npd_raw.resource__20260101__r999 (LIKE npd_raw.resource) "
+                     "PARTITION BY LIST (resource_type)")
+        conn.execute("CREATE TABLE npd_raw.resource__20260101__r999__practitioner (LIKE npd_raw.resource)")
+        conn.execute("ALTER TABLE npd_raw.resource__20260101__r999 ATTACH PARTITION "
+                     "npd_raw.resource__20260101__r999__practitioner FOR VALUES IN ('Practitioner')")
+        conn.execute("CREATE TABLE npd_raw.resource__20260101__r999__organization (LIKE npd_raw.resource)")
+    assert run_import(ctx) is Outcome.SKIPPED            # cleanup runs as soon as the import lock is held
+    assert one(ctx.npd_conninfo, "SELECT count(*) FROM pg_class WHERE relname ~ '__r999'") == 0
+    assert "npd.practitioner__20260101__r999" in caplog.text
+    with psycopg.connect(ctx.npd_conninfo) as conn:
+        assert list_release_partitions(conn, "npd", "practitioner") == {R: f"practitioner__20260929__r{first}"}
+        assert list_release_partitions(conn, "npd_raw", "resource") == {R: f"resource__20260929__r{first}"}
+    assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd.v_practitioner") == 2
+    assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd_raw.resource") == 12
+
+
 def test_bad_data_fails_cleanly(tmp_path, cms, npd_db):
     bad = b'{"resourceType": "Practitioner", "id": "P1"}\n{oops\n'
     ctx = downloaded_ctx(tmp_path, cms, npd_db,

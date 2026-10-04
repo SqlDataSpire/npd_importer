@@ -46,14 +46,34 @@ def find_inputs(ctx: Context, release: date, download_run: Run) -> ImportInputs 
     return ImportInputs(inputs, sorted(run_ids))
 
 
-def drop_standalone_tables(conninfo: str, schemas: list[str], run_id: int) -> None:
+def drop_standalone_tables(conninfo: str, schemas: list[str], run_id: int | None = None) -> list[str]:
+    """Drop the unpublished (non-partition) tables of import run `run_id`, or of any run when run_id is None.
+    Only safe with the import lock held. Returns the dropped tables."""
+    run = str(run_id) if run_id is not None else r"\d+"
+    dropped = []
     with psycopg.connect(conninfo, autocommit=True) as conn:
         rows = conn.execute(
             "SELECT n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = ANY(%s) AND c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relname ~ %s",
-            (schemas, rf"__r{run_id}(__[a-z]+)?$")).fetchall()
+            "WHERE n.nspname = ANY(%s) AND c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relname ~ %s "
+            "ORDER BY 1, 2", (schemas, rf"__r{run}(__[a-z]+)?$")).fetchall()
         for schema, name in rows:
             conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(schema, name)))
+            dropped.append(f"{schema}.{name}")
+    return dropped
+
+
+def _drop_orphans(ctx: Context) -> None:
+    """With the import lock held no import is running, so any standalone table left by an import that was
+    killed (SIGTERM/SIGKILL/OOM) before its cleanup ran is an orphan."""
+    db = ctx.config.npd_db
+    try:
+        dropped = drop_standalone_tables(ctx.npd_conninfo, [db.raw_schema, db.schema])
+    except Exception:
+        log.exception("could not drop orphaned standalone tables")
+        return
+    if dropped:
+        log.warning("dropped %d orphaned standalone tables of earlier interrupted imports: %s",
+                    len(dropped), ", ".join(dropped))
 
 
 def _import(ctx: Context, run: Run, release: date, inputs: list[NdjsonInput], force: bool) -> list[dict]:
@@ -83,6 +103,7 @@ def run_import(ctx: Context, release: date | None = None, force: bool = False) -
         if not acquired:
             log.info("another import is running; nothing to do")
             return Outcome.LOCKED
+        _drop_orphans(ctx)
         download_run = ctx.catalog.last_successful_run(cat.run_class_download, release)
         if download_run is None:
             raise StageFailed(f"no successful download for release {release or '(any)'}")
