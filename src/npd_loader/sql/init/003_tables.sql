@@ -124,11 +124,20 @@ CREATE TABLE IF NOT EXISTS <<schema>>.practitioner_role (
     active boolean,
     practitioner_id text,
     organization_id text,
-    period_start timestamptz, period_end timestamptz
+    period_start timestamptz, period_end timestamptz,
+    network_organization_id text,
+    accepting_patients text
 ) PARTITION BY LIST (release_date);
 CREATE UNIQUE INDEX IF NOT EXISTS practitioner_role_key ON <<schema>>.practitioner_role (release_date, resource_id);
 CREATE INDEX IF NOT EXISTS practitioner_role_practitioner ON <<schema>>.practitioner_role (release_date, practitioner_id);
 CREATE INDEX IF NOT EXISTS practitioner_role_organization ON <<schema>>.practitioner_role (release_date, organization_id);
+
+CREATE TABLE IF NOT EXISTS <<schema>>.practitioner_role_telecom (
+    release_date date NOT NULL, resource_id text NOT NULL, ndjson_file_id integer NOT NULL, zst_file_id integer NOT NULL,
+    seq integer NOT NULL,
+    system text, use text, value text
+) PARTITION BY LIST (release_date);
+CREATE UNIQUE INDEX IF NOT EXISTS practitioner_role_telecom_key ON <<schema>>.practitioner_role_telecom (release_date, resource_id, seq);
 
 CREATE TABLE IF NOT EXISTS <<schema>>.practitioner_role_endpoint (
     release_date date NOT NULL, resource_id text NOT NULL, ndjson_file_id integer NOT NULL, zst_file_id integer NOT NULL,
@@ -168,6 +177,13 @@ CREATE TABLE IF NOT EXISTS <<schema>>.organization_affiliation (
     period_start timestamptz, period_end timestamptz
 ) PARTITION BY LIST (release_date);
 CREATE UNIQUE INDEX IF NOT EXISTS organization_affiliation_key ON <<schema>>.organization_affiliation (release_date, resource_id);
+
+CREATE TABLE IF NOT EXISTS <<schema>>.organization_affiliation_network (
+    release_date date NOT NULL, resource_id text NOT NULL, ndjson_file_id integer NOT NULL, zst_file_id integer NOT NULL,
+    seq integer NOT NULL,
+    network_organization_id text
+) PARTITION BY LIST (release_date);
+CREATE UNIQUE INDEX IF NOT EXISTS organization_affiliation_network_key ON <<schema>>.organization_affiliation_network (release_date, resource_id, seq);
 
 CREATE TABLE IF NOT EXISTS <<schema>>.healthcare_service (
     release_date date NOT NULL, resource_id text NOT NULL, ndjson_file_id integer NOT NULL, zst_file_id integer NOT NULL,

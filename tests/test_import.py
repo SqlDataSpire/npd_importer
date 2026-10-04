@@ -42,7 +42,7 @@ def test_import_extracts_loads_and_publishes(ctx):
     assert f"<download_run_id>{download_id}</download_run_id>" in imp["config_xml"]
     assert f"<extract_run_ids>{extract_id}</extract_run_ids>" in imp["config_xml"]
     assert '<table table="npd.practitioner" rows="2" />' in imp["output_xml"]
-    assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd_raw.resource WHERE release_date = %s", R) == 11
+    assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd_raw.resource WHERE release_date = %s", R) == 12
     assert one(ctx.npd_conninfo, "SELECT import_run_id FROM npd.release WHERE release_date = %s", R) == import_id
     assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd.v_practitioner") == 2
     ndjson = {r.id: r for r in ctx.catalog.get_data_files(R, "ndjson")}
@@ -65,7 +65,7 @@ def test_force_replaces_the_release(ctx):
         assert list_release_partitions(conn, "npd", "practitioner") == {R: f"practitioner__20260929__r{second}"}
         assert list_release_partitions(conn, "npd_raw", "resource") == {R: f"resource__20260929__r{second}"}
     assert one(ctx.npd_conninfo, "SELECT import_run_id FROM npd.release") == second
-    assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd_raw.resource") == 11
+    assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd_raw.resource") == 12
     assert one(ctx.npd_conninfo, "SELECT count(*) FROM npd.v_practitioner") == 2
 
 

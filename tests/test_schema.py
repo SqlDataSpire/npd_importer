@@ -11,10 +11,11 @@ from npd_loader.schema import init_db
 NPD_TABLES = [
     "endpoint", "healthcare_service", "healthcare_service_location", "identifier", "insurance_plan",
     "insurance_plan_alias", "insurance_plan_network", "location", "location_telecom", "organization",
-    "organization_address", "organization_affiliation", "organization_endpoint", "organization_telecom",
+    "organization_address", "organization_affiliation", "organization_affiliation_network",
+    "organization_endpoint", "organization_telecom",
     "practitioner", "practitioner_address", "practitioner_name", "practitioner_qualification",
     "practitioner_role", "practitioner_role_code", "practitioner_role_endpoint", "practitioner_role_location",
-    "practitioner_role_specialty", "practitioner_telecom",
+    "practitioner_role_specialty", "practitioner_role_telecom", "practitioner_telecom",
 ]
 
 

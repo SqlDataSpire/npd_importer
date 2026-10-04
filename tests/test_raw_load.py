@@ -21,7 +21,7 @@ def test_loads_every_type_with_lineage(npd_db, storage):
         result = load_fixture_raw(conn, storage)
         assert result.table == "resource__20260929__r7"
         assert result.rows == {"Endpoint": 1, "HealthcareService": 1, "InsurancePlan": 1, "Location": 1,
-                               "Organization": 2, "OrganizationAffiliation": 1, "Practitioner": 2,
+                               "Organization": 2, "OrganizationAffiliation": 2, "Practitioner": 2,
                                "PractitionerRole": 2}
         row = conn.execute(
             "SELECT release_date, resource_type, last_updated, ndjson_file_id, zst_file_id, line_number, resource "

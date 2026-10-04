@@ -131,7 +131,16 @@ PR2 = {"resourceType": "PractitionerRole", "id": "PractitionerRole-0f00aa11",
                              "code": "ph", "display": "Physician"}]}],
        "specialty": [{"coding": [{"system": "http://nucc.org/provider-taxonomy", "code": "207R00000X",
                                   "display": "Internal Medicine Physician"}], "text": "Internal Medicine"}],
-       "period": {"start": "2020-01-01T00:00:00Z"}}
+       "period": {"start": "2020-01-01T00:00:00Z"},
+       "telecom": [{"system": "phone", "value": "5551234567", "use": "work"}],
+       "extension": [{"url": NDH + "base-ext-network-reference",
+                      "valueReference": {"reference":
+                                         "Organization/Organization-ea579d05-454e-4359-8751-900c940a599a"}},
+                    {"url": NDH + "base-ext-newpatients",
+                     "extension": [{"url": "acceptingPatients",
+                                    "valueCodeableConcept": {
+                                        "coding": [{"system": "http://hl7.org/fhir/us/ndh/CodeSystem/AcceptingPatientsCS",
+                                                   "code": "newpt", "display": "Accepting"}]}}]}]}
 
 OA1 = {"resourceType": "OrganizationAffiliation", "id": "OrganizationAffiliation-00111700-8fc3-4ea1-a966-4c3d59b41921",
        "meta": {"lastUpdated": "2026-09-29T04:11:32.072722Z"}, "active": True,
@@ -139,6 +148,12 @@ OA1 = {"resourceType": "OrganizationAffiliation", "id": "OrganizationAffiliation
        "participatingOrganization": {"reference": "Organization/Organization-1407192586"},
        "code": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/organization-affiliation-role",
                              "code": "bt", "display": "Member Of"}], "text": "Member Of"}]}
+
+OA2 = {"resourceType": "OrganizationAffiliation", "id": "OrganizationAffiliation-oa00002",
+       "meta": {"lastUpdated": "2026-09-29T04:12:00Z"}, "active": True,
+       "organization": {"reference": "Organization/Organization-1336200294"},
+       "participatingOrganization": {"reference": "Organization/Organization-1902099112"},
+       "network": [{"reference": "Organization/Organization-c7d4aa30-a4c0-4733-aa2c-c8086e29159b"}]}
 
 RECORDS: dict[str, list[dict]] = {
     "01-Organization.ndjson": [ORG1, ORG2],
@@ -148,7 +163,7 @@ RECORDS: dict[str, list[dict]] = {
     "05-InsurancePlan.ndjson": [IP1],
     "06-Practitioner.ndjson": [PRAC1, PRAC2],
     "07-PractitionerRole.ndjson": [PR1, PR2],
-    "08-OrganizationAffiliation.ndjson": [OA1],
+    "08-OrganizationAffiliation.ndjson": [OA1, OA2],
 }
 
 

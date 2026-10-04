@@ -128,6 +128,14 @@ PractitionerRole .code[].coding[].system
 PractitionerRole .code[].coding[].code
 PractitionerRole .code[].coding[].display
 PractitionerRole .code[].text
+PractitionerRole .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-network-reference].valueReference.reference
+PractitionerRole .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-newpatients].extension[acceptingPatients].valueCodeableConcept.coding[].code
+PractitionerRole .telecom[].system
+PractitionerRole .telecom[].use
+PractitionerRole .telecom[].value
+# raw-only
+PractitionerRole .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-newpatients].extension[acceptingPatients].valueCodeableConcept.coding[].display
+PractitionerRole .extension[http://hl7.org/fhir/us/ndh/StructureDefinition/base-ext-newpatients].extension[acceptingPatients].valueCodeableConcept.coding[].system
 
 # OrganizationAffiliation (060_organization_affiliation.sql)
 OrganizationAffiliation .active
@@ -138,6 +146,7 @@ OrganizationAffiliation .code[].coding[].display
 OrganizationAffiliation .code[].text
 OrganizationAffiliation .period.start
 OrganizationAffiliation .period.end
+OrganizationAffiliation .network[].reference
 # raw-only
 OrganizationAffiliation .code[].coding[].system
 

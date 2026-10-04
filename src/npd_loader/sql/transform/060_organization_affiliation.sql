@@ -13,3 +13,10 @@ SELECT r.release_date, r.resource_id, r.ndjson_file_id, r.zst_file_id, r.last_up
        <<schema>>.fhir_ts(r.resource->'period'->>'end')
 FROM <<raw>> r
 WHERE r.resource_type = 'OrganizationAffiliation';
+
+INSERT INTO <<t:organization_affiliation_network>> (
+    release_date, resource_id, ndjson_file_id, zst_file_id, seq, network_organization_id)
+SELECT r.release_date, r.resource_id, r.ndjson_file_id, r.zst_file_id, x.ord, <<schema>>.ref_id(x.e->>'reference')
+FROM <<raw>> r
+CROSS JOIN LATERAL jsonb_array_elements(coalesce(r.resource->'network', '[]'::jsonb)) WITH ORDINALITY AS x(e, ord)
+WHERE r.resource_type = 'OrganizationAffiliation';
