@@ -1,0 +1,6 @@
+# JSON paths that the sql/transform scripts flatten, or that are deliberately left raw-only.
+# Format: <ResourceType or *> <path>. Paths use [] for arrays and .extension[<url>] for extensions.
+# `npd-loader profile FILE --unmapped` lists every path in FILE that is not listed here.
+* .id
+* .resourceType
+* .meta.lastUpdated
