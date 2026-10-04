@@ -14,6 +14,7 @@ from npd_loader.extract import run_extract
 from npd_loader.manifest import resource_type_for
 from npd_loader.publish import PublishConflict, publish_release
 from npd_loader.raw_load import RAW_PARENT, NdjsonInput, RawLoadError, load_raw
+from npd_loader.retention import apply_retention
 from npd_loader.runxml import build_output_xml
 from npd_loader.stages import (Context, Outcome, StageFailed, completed_child, config_xml, describe, fail_run, now,
                                original_name)
@@ -69,7 +70,9 @@ def _import(ctx: Context, run: Run, release: date, inputs: list[NdjsonInput], fo
 
 
 def _finish(ctx: Context, run: Run, release: date, summary: list[dict]) -> None:
-    ctx.catalog.finish_run(run, SUCCESS, output_xml=build_output_xml(summary, item_tag="table"))
+    warnings = apply_retention(ctx, release)
+    ctx.catalog.finish_run(run, SUCCESS, result="; ".join(warnings) or None,
+                           output_xml=build_output_xml(summary, item_tag="table"))
 
 
 def run_import(ctx: Context, release: date | None = None, force: bool = False) -> Outcome:

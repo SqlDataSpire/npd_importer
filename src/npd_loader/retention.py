@@ -1,0 +1,52 @@
+"""Keep the newest N imported releases: drop older partitions and their .ndjson files.
+Never touches the release just imported, .zst/manifest files, or catalog rows."""
+from __future__ import annotations
+
+import logging
+from datetime import date
+
+import psycopg
+
+from npd_loader.db import list_parent_tables, list_release_partitions
+from npd_loader.publish import drop_release
+from npd_loader.stages import Context
+
+log = logging.getLogger(__name__)
+
+
+def _delete_ndjson(ctx: Context, release: date) -> None:
+    for row in ctx.catalog.get_data_files(release, ctx.config.catalog.file_type_ndjson):
+        if not row.file_rel_path:
+            continue
+        for rel in (row.file_rel_path, row.file_rel_path + ".part"):
+            if ctx.storage.exists(rel):
+                ctx.storage.delete(rel)
+                log.info("retention deleted %s", rel)
+
+
+def apply_retention(ctx: Context, just_imported: date) -> list[str]:
+    cfg = ctx.config
+    db = cfg.npd_db
+    warnings: list[str] = []
+    try:
+        with psycopg.connect(ctx.npd_conninfo) as conn:
+            published: set[date] = set()
+            for schema in (db.raw_schema, db.schema):
+                for parent in list_parent_tables(conn, schema):
+                    published |= set(list_release_partitions(conn, schema, parent))
+            imported = set(ctx.catalog.successful_releases(cfg.catalog.run_class_import)) | published | {just_imported}
+            keep = set(sorted(imported, reverse=True)[:cfg.retention.keep_releases]) | {just_imported}
+            for release in sorted(imported - keep):
+                try:
+                    if release in published:
+                        dropped = drop_release(conn, db.raw_schema, db.schema, release)
+                        log.info("retention dropped %d partitions of release %s", len(dropped), release)
+                    _delete_ndjson(ctx, release)
+                except Exception as exc:
+                    conn.rollback()
+                    warnings.append(f"retention of release {release}: {exc}")
+    except Exception as exc:
+        warnings.append(f"retention: {exc}")
+    for warning in warnings:
+        log.warning(warning)
+    return warnings
