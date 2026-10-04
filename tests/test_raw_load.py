@@ -64,7 +64,7 @@ def test_strict_validation(npd_db, storage, lines, message):
     with psycopg.connect(npd_db) as conn:
         with pytest.raises(RawLoadError, match=message) as info:
             load_fixture_raw(conn, storage, {"06-Practitioner.ndjson": data})
-    assert info.value.file_id is not None or "duplicate" in message
+    assert info.value.file_id == 500  # the only input (write_inputs numbers files from 500)
 
 
 def test_escaped_backslash_before_u0000_loads(npd_db, storage):
@@ -78,10 +78,12 @@ def test_escaped_backslash_before_u0000_loads(npd_db, storage):
 
 
 def test_duplicate_error_names_the_id(npd_db, storage):
-    data = ndjson_bytes([PRAC1, PRAC2, PRAC1])
+    ndjson = {"03-Organization.ndjson": ndjson_bytes([ORG1]),
+              "06-Practitioner.ndjson": ndjson_bytes([PRAC1, PRAC2, PRAC1])}
     with psycopg.connect(npd_db) as conn:
-        with pytest.raises(RawLoadError, match="Practitioner-1003000100 .*lines \\[1, 3\\]"):
-            load_fixture_raw(conn, storage, {"06-Practitioner.ndjson": data})
+        with pytest.raises(RawLoadError, match="Practitioner-1003000100 .*lines \\[1, 3\\]") as info:
+            load_fixture_raw(conn, storage, ndjson)
+    assert info.value.file_id == 502  # the Practitioner file (Organization is 500), so data_file.exceptions is set
 
 
 def test_unknown_resource_type_loads_raw(npd_db, storage):

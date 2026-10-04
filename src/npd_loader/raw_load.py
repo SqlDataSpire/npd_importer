@@ -132,7 +132,9 @@ def _load_file(conn: psycopg.Connection, storage: Storage, raw_schema: str, tabl
     return lines
 
 
-def _index_and_check_duplicates(conn: psycopg.Connection, raw_schema: str, table: str) -> None:
+def _index_and_check_duplicates(conn: psycopg.Connection, raw_schema: str, table: str,
+                                file_ids: dict[str, int]) -> None:
+    """`file_ids` maps resource_type to its .ndjson data_file id, so the error names the file to blame."""
     target = sql.Identifier(raw_schema, table)
     try:
         clone_parent_indexes(conn, raw_schema, RAW_PARENT, target)
@@ -143,12 +145,12 @@ def _index_and_check_duplicates(conn: psycopg.Connection, raw_schema: str, table
             "SELECT resource_type, resource_id, array_agg(line_number ORDER BY line_number) FROM {} "
             "GROUP BY 1, 2 HAVING count(*) > 1 ORDER BY 1, 2 LIMIT 20").format(target)).fetchall()
         detail = "; ".join(f"{t} {i} at lines {lines}" for t, i, lines in dups)
-        raise RawLoadError(f"duplicate resource ids: {detail}")
+        raise RawLoadError(f"duplicate resource ids: {detail}", file_ids.get(dups[0][0]) if dups else None)
 
 
 def load_raw(conn: psycopg.Connection, storage: Storage, raw_schema: str, release: date, run_id: int,
              inputs: list[NdjsonInput]) -> RawLoadResult:
     table = _create_release_table(conn, raw_schema, release, run_id)
     rows = {inp.resource_type: _load_file(conn, storage, raw_schema, table, release, inp) for inp in inputs}
-    _index_and_check_duplicates(conn, raw_schema, table)
+    _index_and_check_duplicates(conn, raw_schema, table, {inp.resource_type: inp.file_id for inp in inputs})
     return RawLoadResult(table, rows)
