@@ -6,7 +6,7 @@ from psycopg import sql
 
 from npd_loader.db import (advisory_lock, list_parent_tables, list_release_partitions, published_releases,
                            render_sql, standalone_name)
-from npd_loader.schema import init_db
+from npd_loader.schema import _init_scripts, init_db
 
 NPD_TABLES = [
     "endpoint", "healthcare_service", "healthcare_service_location", "identifier", "insurance_plan",
@@ -27,6 +27,28 @@ def test_init_db_is_idempotent_and_creates_parents_and_views(npd_db):
         views = {r[0] for r in conn.execute(
             "SELECT schemaname || '.' || viewname FROM pg_views WHERE schemaname IN ('npd', 'npd_raw')")}
         assert views == {f"npd.v_{t}" for t in NPD_TABLES} | {"npd_raw.v_resource"}
+
+
+def test_migrations_script_runs_last():
+    names = [name for name, _ in _init_scripts()]
+    assert names[-1] == "900_migrations.sql" and names == sorted(names)
+
+
+def test_init_db_applies_add_column_migrations_idempotently(npd_db):
+    migration = "ALTER TABLE <<schema>>.practitioner ADD COLUMN IF NOT EXISTS test_added text;"
+    with psycopg.connect(npd_db) as conn:          # an existing published release
+        conn.execute("CREATE TABLE npd.practitioner__20260929__r1 (LIKE npd.practitioner)")
+        conn.execute("ALTER TABLE npd.practitioner ATTACH PARTITION npd.practitioner__20260929__r1 "
+                     "FOR VALUES IN ('2026-09-29')")
+    for _ in range(2):
+        init_db(npd_db, "npd_raw", "npd", extra_scripts=[migration])
+    with psycopg.connect(npd_db) as conn:
+        def has_column(table):
+            return conn.execute("SELECT count(*) FROM information_schema.columns WHERE table_schema = 'npd' "
+                                "AND table_name = %s AND column_name = 'test_added'", (table,)).fetchone()[0]
+        assert has_column("practitioner") == 1
+        assert has_column("practitioner__20260929__r1") == 1
+        assert has_column("v_practitioner") == 1      # views are recreated with the new column
 
 
 def test_helper_functions(npd_db):
