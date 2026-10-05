@@ -14,11 +14,12 @@ from npd_loader.runxml import parse_release
 
 SUCCESS = "Success"
 FAILED = "Failed"
-MAX_TEXT = 8000
+MAX_RESULT = 2000  # master_warehouse_run.result is varchar(2000)
+MAX_EXCEPTIONS = 8000  # data_file.exceptions is varchar(8000)
 
 
-def truncate(text: str | None) -> str | None:
-    return None if text is None else text[:MAX_TEXT]
+def truncate(text: str | None, limit: int) -> str | None:
+    return None if text is None else text[:limit]
 
 
 @dataclass(frozen=True)
@@ -59,7 +60,7 @@ def clean_fields(fields: dict[str, object]) -> dict[str, object]:
     if unknown:
         raise TypeError(f"unknown data_file fields: {sorted(unknown)}")
     if isinstance(fields.get("exceptions"), str):
-        fields = {**fields, "exceptions": truncate(fields["exceptions"])}
+        fields = {**fields, "exceptions": truncate(fields["exceptions"], MAX_EXCEPTIONS)}
     return fields
 
 
@@ -102,7 +103,7 @@ class CssCatalogPg:
     def start_run(self, run_class: str, description: str, config_xml: str) -> Run:
         started = datetime.now().replace(microsecond=0)
         query = sql.SQL("INSERT INTO {} (project, run_type, run_class, run_description, xml_config, date_started) "
-                        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING run_id").format(self._runs)
+                        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id").format(self._runs)
         with self._connect() as conn:
             run_id = conn.execute(query, (self._cfg.project, self._cfg.run_type, run_class, description,
                                           config_xml, started)).fetchone()[0]
@@ -111,9 +112,9 @@ class CssCatalogPg:
     def finish_run(self, run: Run, status: str, result: str | None = None, output_xml: str | None = None) -> None:
         label = {SUCCESS: self._cfg.status_success, FAILED: self._cfg.status_failed}[status]
         query = sql.SQL("UPDATE {} SET completion_status = %s, date_completed = %s, result = %s, xml_output = %s "
-                        "WHERE run_id = %s").format(self._runs)
+                        "WHERE id = %s").format(self._runs)
         with self._connect() as conn:
-            conn.execute(query, (label, datetime.now().replace(microsecond=0), truncate(result), output_xml, run.id))
+            conn.execute(query, (label, datetime.now().replace(microsecond=0), truncate(result, MAX_RESULT), output_xml, run.id))
 
     def add_data_file(self, run: Run, **fields: object) -> int:
         fields = clean_fields(fields)
@@ -143,7 +144,7 @@ class CssCatalogPg:
             return [DataFile(**row) for row in cur.fetchall()]
 
     def _successful_runs(self, run_class: str) -> list[Run]:
-        query = sql.SQL("SELECT run_id, run_class, run_description, xml_config::text, date_started, "
+        query = sql.SQL("SELECT id, run_class, run_description, xml_config::text, date_started, "
                         "completion_status FROM {} WHERE project = %s AND run_type = %s AND run_class = %s "
                         "AND completion_status = %s").format(self._runs)
         with self._connect() as conn:

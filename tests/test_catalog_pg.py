@@ -28,12 +28,12 @@ def test_writes_configured_labels(catalog_db):
     catalog.finish_run(failed, FAILED, result="y" * 9000)
     with psycopg.connect(catalog_db) as conn:
         row = conn.execute("SELECT project, run_type, run_class, run_description, completion_status, "
-                           "date_completed IS NOT NULL, parent_run_id FROM master_warehouse_run WHERE run_id = %s",
+                           "date_completed IS NOT NULL, parent_run_id FROM master_warehouse_run WHERE id = %s",
                            (run.id,)).fetchone()
         assert row == ("NPD", "National Provider Directory", "DOWNLOAD", "NPD FHIR Download 2026-09-29",
                        "Success", True, None)
-        assert conn.execute("SELECT completion_status, length(result) FROM master_warehouse_run WHERE run_id = %s",
-                            (failed.id,)).fetchone() == ("Failed", 8000)
+        assert conn.execute("SELECT completion_status, length(result) FROM master_warehouse_run WHERE id = %s",
+                            (failed.id,)).fetchone() == ("Failed", 2000)
         assert conn.execute("SELECT file_set, source_version_name, run_id FROM data_file WHERE id = %s",
                             (fid,)).fetchone() == ("NPD_FHIR", "NPD release", run.id)
 

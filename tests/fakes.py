@@ -4,7 +4,7 @@ from __future__ import annotations
 import itertools
 from datetime import date, datetime
 
-from npd_loader.catalog import (DATA_FILE_FIELDS, SUCCESS, DataFile, Run, clean_fields, newest_run,
+from npd_loader.catalog import (DATA_FILE_FIELDS, MAX_RESULT, SUCCESS, DataFile, Run, clean_fields, newest_run,
                                 releases_of, truncate)
 from npd_loader.runxml import build_config_xml, parse_release
 
@@ -29,7 +29,7 @@ class FakeCatalog:
         return self._run(run_id)
 
     def finish_run(self, run: Run, status: str, result: str | None = None, output_xml: str | None = None) -> None:
-        self.runs[run.id].update(status=status, result=truncate(result), output_xml=output_xml)
+        self.runs[run.id].update(status=status, result=truncate(result, MAX_RESULT), output_xml=output_xml)
 
     def add_data_file(self, run: Run, **fields: object) -> int:
         fields = clean_fields(fields)
