@@ -29,3 +29,6 @@ Thumbs.db
 
 # Subagent-driven-development scratch
 .superpowers/
+
+# Local Postgres server and data (not source)
+local_pg/
