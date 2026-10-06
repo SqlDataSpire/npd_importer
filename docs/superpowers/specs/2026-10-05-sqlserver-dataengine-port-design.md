@@ -64,7 +64,7 @@ databases = '{"data":    {"type":"mssql","server":"cssnpi","database":"npd","tru
 ### Modules
 
 - `connections.py` (new): reads `env_file` with `dotenv_values`, parses the `databases` JSON, and builds the two
-  named objects with `DataEngine.connectionGenerator(dict)`. Reading the path from config means the loader never
+  named objects with DataEngine's `SqlConnectionObject` / `PgConnectionObject` constructors (the documented programmatic mode; DataEngine is imported with its import-time stdout output suppressed). Reading the path from config means the loader never
   depends on `database.env` being in the working directory. Missing names, or a type other than mssql/postgres,
   raise `ConfigError`.
 - `dialect/__init__.py`: the `Dialect` protocol and `dialect_for(engine)`, picked from `engine.dialect.name`
@@ -161,8 +161,9 @@ Translation:
 - `LEFT JOIN LATERAL (... LIMIT 1) ON true` → `OUTER APPLY (SELECT TOP 1 ... ORDER BY ...)`
 - helpers become inline table-valued functions used with `OUTER APPLY`: `ext(@resource, @url)`,
   `identifier_value(@resource, @systems)` (systems as a JSON array string), `join_text(@arr, @sep)` (`STRING_AGG …
-  WITHIN GROUP (ORDER BY key)`), `fhir_ts(@v)` (`YYYY`, `YYYY-MM`, full with offset → UTC `datetime2(3)` via
-  `datetimeoffset`). `ref_id` becomes an inline `RIGHT`/`CHARINDEX` expression.
+  WITHIN GROUP (ORDER BY key)`). `fhir_ts(@v)` (`YYYY`, `YYYY-MM`, full with offset → UTC `datetime2(3)` via
+  `datetimeoffset`) and `ref_id(@ref)` (`RIGHT`/`CHARINDEX`) are scalar functions made of a single expression,
+  which SQL Server 2019 inlines (compatibility level 150).
 - Plain `CAST`, not `TRY_CAST`: a malformed value fails the import, as in Postgres.
 
 Inserts use `WITH (TABLOCK)` into the empty heaps for minimal logging; indexes are built after all scripts.
@@ -180,14 +181,15 @@ transaction is retried 3 times with backoff (today's policy):
    only, thanks to the `CHECK` and aligned indexes).
 4. `MERGE` into `<schema>.release`; commit. Then `UPDATE STATISTICS` on the published tables (replaces `ANALYZE`).
 
-**Published releases** per table come from `sys.partitions` joined to `sys.partition_range_values`: boundaries
-whose partition has rows. `<schema>.release` remains the published record.
+**Published releases** are the boundaries of the partition functions (`sys.partition_range_values`): publish adds a
+release's boundary and retention removes it, in the same transactions. Whether a table's partition holds rows
+(`sys.partitions`) decides only the `--force` switch-out. `<schema>.release` remains the published record.
 
 **Retention**: same policy code. Dropping a release switches each table's partition out, drops the staging tables,
 `MERGE RANGE (@release)` on each function (empty partition; no rows move), and deletes from `<schema>.release`. A
 lock timeout is a warning, retried on the next run.
 
-**Run lock**: `sp_getapplock @Resource = 'npd_loader:<stage>', @LockMode = 'Exclusive', @LockOwner = 'Session',
+**Run lock**: `sp_getapplock @Resource = 'npd_loader:<schema>:<stage>', @LockMode = 'Exclusive', @LockOwner = 'Session',
 @LockTimeout = 0` on a dedicated connection held for the stage; `sp_releaseapplock` on exit. A result < 0 means
 another run holds it (exit 0, as today).
 
