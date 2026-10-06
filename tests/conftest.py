@@ -126,3 +126,14 @@ def mssql_schemas(mssql_engine):
 
     yield factory
     drop_schemas(mssql_engine, created)
+
+
+@pytest.fixture
+def mssql_dialect(mssql_engine, mssql_schemas):
+    from npd_loader.config import NpdDbConfig
+    from npd_loader.dialect.mssql import MssqlDialect
+    raw, data = mssql_schemas("raw", "")
+    d = MssqlDialect(mssql_engine, NpdDbConfig(connection="data", raw_schema=raw, schema=data,
+                                               lock_timeout_seconds=2), sleep=lambda s: None)
+    d.init_db()
+    return d
