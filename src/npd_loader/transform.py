@@ -1,4 +1,4 @@
-"""IMPORT, table part: run sql/transform/*.sql (in name order) into standalone tables for one release."""
+"""IMPORT, table part: run sql/postgres/transform/*.sql (in name order) into standalone tables for one release."""
 from __future__ import annotations
 
 import logging
@@ -21,7 +21,7 @@ class TransformResult:
 
 
 def _scripts() -> list[tuple[str, str]]:
-    folder = resources.files("npd_loader") / "sql" / "transform"
+    folder = resources.files("npd_loader") / "sql" / "postgres" / "transform"
     return [(p.name, p.read_text(encoding="utf-8")) for p in sorted(folder.iterdir(), key=lambda p: p.name)
             if p.name.endswith(".sql")]
 

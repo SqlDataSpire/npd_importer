@@ -12,7 +12,7 @@ from npd_loader.db import list_parent_tables, render_sql
 
 def _init_scripts() -> list[tuple[str, str]]:
     """(name, text) of every init script in name order; 900_migrations.sql runs last."""
-    folder = resources.files("npd_loader") / "sql" / "init"
+    folder = resources.files("npd_loader") / "sql" / "postgres" / "init"
     return [(p.name, p.read_text(encoding="utf-8")) for p in sorted(folder.iterdir(), key=lambda p: p.name)
             if p.name.endswith(".sql")]
 

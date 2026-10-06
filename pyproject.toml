@@ -24,8 +24,7 @@ npd-loader = "npd_loader.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-npd_loader = ["sql/*/init/*.sql", "sql/*/transform/*.sql", "sql/init/*.sql", "sql/transform/*.sql",
-              "sql/mapped_paths.txt"]
+npd_loader = ["sql/*/init/*.sql", "sql/*/transform/*.sql", "sql/mapped_paths.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
