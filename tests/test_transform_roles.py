@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 
-import psycopg
 import pytest
 
 from npd_loader.storage import LocalStorage
-from pg_helpers import rows, transformed
+from helpers import pg_dialect
+from pg_helpers import open_conn, rows, transformed
 
 PR1 = "PractitionerRole-00000990-37aa-428a-a1fd-d91bed7c789d"
 PR2 = "PractitionerRole-0f00aa11"
@@ -20,8 +20,8 @@ def utc(*args):
 
 @pytest.fixture
 def result(npd_db, tmp_path):
-    conn = psycopg.connect(npd_db)
-    res = transformed(conn, LocalStorage(tmp_path / "data"))
+    res = transformed(pg_dialect(npd_db), LocalStorage(tmp_path / "data"))
+    conn = open_conn(npd_db)
     yield conn, res
     conn.close()
 

@@ -2,28 +2,28 @@ import os
 import uuid
 from pathlib import Path
 
-import psycopg
+import psycopg2
 import pytest
-from psycopg.conninfo import conninfo_to_dict, make_conninfo
+from psycopg2.extensions import make_dsn
 
 PG_IMAGE = os.environ.get("NPD_TEST_PG_IMAGE", "postgres:16")
 TESTS = Path(__file__).resolve().parent
 
 
-def _with_dbname(admin_dsn: str, dbname: str) -> str:
-    """Build a conninfo for `dbname` on the same server as `admin_dsn`, changing only dbname.
-
-    Shared by both the external-server path (R1) and the testcontainers path, so neither has to
-    know how the other addresses the server.
-    """
-    info = conninfo_to_dict(admin_dsn)
-    info["dbname"] = dbname
-    return make_conninfo(**info)
+def _admin_execute(dsn: str, statement: str) -> None:
+    """Run `statement` on its own autocommit psycopg2 connection (CREATE/DROP DATABASE need one)."""
+    conn = psycopg2.connect(dsn)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(statement)
+    finally:
+        conn.close()
 
 
 @pytest.fixture(scope="session")
 def pg_server():
-    """Yields an admin conninfo string (dbname=postgres) for a running Postgres server.
+    """Yields an admin libpq DSN (dbname=postgres) for a running Postgres server.
 
     If NPD_TEST_PG_DSN is set, that DSN is used as-is and no container is started (R1: for
     environments without Docker where a Postgres server is already available). Otherwise a
@@ -41,36 +41,35 @@ def pg_server():
     except Exception as exc:  # Docker not running / not installed
         pytest.skip(f"Docker Postgres unavailable: {exc}")
     try:
-        yield make_conninfo(host=container.get_container_host_ip(), port=int(container.get_exposed_port(5432)),
-                             user="test", password="test", dbname="postgres")
+        yield make_dsn(host=container.get_container_host_ip(), port=int(container.get_exposed_port(5432)),
+                       user="test", password="test", dbname="postgres")
     finally:
         container.stop()
 
 
 @pytest.fixture
 def make_db(pg_server):
+    """Factory: a new empty database on the test server, as a DSN; all dropped after the test."""
+    from pg_helpers import with_dbname
     admin_dsn = pg_server
     created: list[str] = []
 
     def factory() -> str:
         name = f"t_{uuid.uuid4().hex[:12]}"
-        with psycopg.connect(admin_dsn, autocommit=True) as conn:
-            conn.execute(f'CREATE DATABASE "{name}"')
+        _admin_execute(admin_dsn, f'CREATE DATABASE "{name}"')
         created.append(name)
-        return _with_dbname(admin_dsn, name)
+        return with_dbname(admin_dsn, name)
 
     yield factory
-    with psycopg.connect(admin_dsn, autocommit=True) as conn:
-        for name in created:
-            conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    for name in created:
+        _admin_execute(admin_dsn, f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
 
 
 @pytest.fixture
 def catalog_db(make_db) -> str:
-    info = make_db()
-    with psycopg.connect(info, autocommit=True) as conn:
-        conn.execute((TESTS / "sql" / "css_catalog_schema.sql").read_text())
-    return info
+    dsn = make_db()
+    _admin_execute(dsn, (TESTS / "sql" / "css_catalog_schema.sql").read_text())
+    return dsn
 
 
 @pytest.fixture
@@ -83,10 +82,13 @@ def cms():
 
 @pytest.fixture
 def npd_db(make_db) -> str:
-    from npd_loader.schema import init_db
-    info = make_db()
-    init_db(info, "npd_raw", "npd")
-    return info
+    """DSN of a new database with init-db applied (schemas npd_raw and npd)."""
+    from helpers import pg_dialect
+    dsn = make_db()
+    d = pg_dialect(dsn)
+    d.init_db()
+    d.engine.dispose()
+    return dsn
 
 
 import json as _json

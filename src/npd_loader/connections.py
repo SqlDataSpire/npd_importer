@@ -56,8 +56,3 @@ def open_connection(config: Config, target: str) -> object:
     if name not in docs:
         raise ConfigError(f"[{target}] connection {name!r} is not in {config.databases.env_file}")
     return build_connection(name, docs[name])
-
-
-def pg_conninfo(obj: object) -> str:
-    """psycopg URI for a PgConnectionObject (used by the Postgres dialect until it moves to SQLAlchemy)."""
-    return obj.engine.url.set(drivername="postgresql").render_as_string(hide_password=False)

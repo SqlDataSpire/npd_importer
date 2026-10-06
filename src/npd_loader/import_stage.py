@@ -5,9 +5,6 @@ import logging
 from dataclasses import dataclass
 from datetime import date
 
-import psycopg
-from psycopg import sql
-
 from npd_loader.catalog import SUCCESS, Run
 from npd_loader.dialect import PublishConflict
 from npd_loader.extract import run_extract
@@ -42,22 +39,6 @@ def find_inputs(ctx: Context, release: date, download_run: Run) -> ImportInputs 
                                   resource_type=resource_type_for(name), name=name))
         run_ids.add(row.run_id)
     return ImportInputs(inputs, sorted(run_ids))
-
-
-def drop_standalone_tables(conninfo: str, schemas: list[str], run_id: int | None = None) -> list[str]:
-    """Drop the unpublished (non-partition) tables of import run `run_id`, or of any run when run_id is None.
-    Only safe with the import lock held. Returns the dropped tables."""
-    run = str(run_id) if run_id is not None else r"\d+"
-    dropped = []
-    with psycopg.connect(conninfo, autocommit=True) as conn:
-        rows = conn.execute(
-            "SELECT n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE n.nspname = ANY(%s) AND c.relkind IN ('r', 'p') AND NOT c.relispartition AND c.relname ~ %s "
-            "ORDER BY 1, 2", (schemas, rf"__r{run}(__[a-z]+)?$")).fetchall()
-        for schema, name in rows:
-            conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(schema, name)))
-            dropped.append(f"{schema}.{name}")
-    return dropped
 
 
 def _drop_orphans(ctx: Context) -> None:

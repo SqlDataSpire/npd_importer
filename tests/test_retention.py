@@ -3,27 +3,24 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, timedelta
 
-import psycopg
 import pytest
-from psycopg import sql
 
-from npd_loader.db import list_parent_tables, list_release_partitions
 from npd_loader.dialect.postgres import PostgresDialect
 from npd_loader.retention import apply_retention
 from helpers import make_ctx, pg_dialect
+from pg_helpers import connect
 
 BASE = date(2026, 8, 4)
 RELEASES = [BASE + timedelta(weeks=k) for k in range(7)]
 
 
-def publish_empty(conn, release: date, run_id: int) -> None:
+def publish_empty(d: PostgresDialect, conn, release: date, run_id: int) -> None:
     for schema in ("npd_raw", "npd"):
-        for parent in list_parent_tables(conn, schema):
+        for parent in d.parent_tables(conn.raw, schema):
             name = f"{parent}__{release:%Y%m%d}__r{run_id}"
-            conn.execute(sql.SQL("CREATE TABLE {} (LIKE {} INCLUDING DEFAULTS)").format(
-                sql.Identifier(schema, name), sql.Identifier(schema, parent)))
-            conn.execute(sql.SQL("ALTER TABLE {} ATTACH PARTITION {} FOR VALUES IN ({})").format(
-                sql.Identifier(schema, parent), sql.Identifier(schema, name), sql.Literal(release)))
+            conn.execute(f"CREATE TABLE {d.q(schema, name)} (LIKE {d.q(schema, parent)} INCLUDING DEFAULTS)")
+            conn.execute(f"ALTER TABLE {d.q(schema, parent)} ATTACH PARTITION {d.q(schema, name)} "
+                         f"FOR VALUES IN ({d.lit(release)})")
     conn.execute("INSERT INTO npd.release (release_date, import_run_id) VALUES (%s, %s)", (release, run_id))
     conn.commit()
 
@@ -46,17 +43,18 @@ def seed(ctx, release: date, run_class: str = "IMPORT") -> tuple[str, str]:
 def ctx(tmp_path, cms, npd_db):
     c = make_ctx(tmp_path, cms, dialect=pg_dialect(npd_db))
     c.paths = {}
-    with psycopg.connect(npd_db) as conn:
+    c.dsn = npd_db
+    with connect(npd_db) as conn:
         for i, release in enumerate(RELEASES):
-            publish_empty(conn, release, 100 + i)
+            publish_empty(c.dialect, conn, release, 100 + i)
             c.paths[release] = seed(c, release)
     return c
 
 
 def published(ctx):
-    with psycopg.connect(ctx.dialect.conninfo) as conn:
-        raw = sorted(list_release_partitions(conn, "npd_raw", "resource"))
-        npd = sorted(list_release_partitions(conn, "npd", "practitioner"))
+    with connect(ctx.dsn) as conn:
+        raw = sorted(PostgresDialect.release_partitions(conn.raw, "npd_raw", "resource"))
+        npd = sorted(PostgresDialect.release_partitions(conn.raw, "npd", "practitioner"))
         rel = [r[0] for r in conn.execute("SELECT release_date FROM npd.release ORDER BY 1")]
     assert raw == npd == rel
     return raw
@@ -98,9 +96,9 @@ def test_errors_become_warnings(ctx, monkeypatch):
 
 
 @contextmanager
-def lock_held(conninfo: str, table: str):
+def lock_held(dsn: str, table: str):
     """Another session (e.g. a long analyst query) holding ACCESS SHARE on `table` until the block ends."""
-    with psycopg.connect(conninfo) as other:
+    with connect(dsn) as other:
         other.execute(f"LOCK TABLE {table} IN ACCESS SHARE MODE")
         yield
         other.rollback()
@@ -109,14 +107,14 @@ def lock_held(conninfo: str, table: str):
 def set_lock_timeout(ctx, seconds: float, sleep=lambda s: None) -> None:
     new_cfg = replace(ctx.config.npd_db, lock_timeout_seconds=seconds)
     ctx.config = replace(ctx.config, npd_db=new_cfg)
-    ctx.dialect = PostgresDialect(ctx.dialect.conninfo, new_cfg, sleep=sleep)
+    ctx.dialect = PostgresDialect(ctx.dialect.engine, new_cfg, sleep=sleep)
 
 
 def test_locked_parent_gives_up_with_a_warning(ctx):
     sleeps = []
     ctx.sleep = sleeps.append
     set_lock_timeout(ctx, 1, sleep=sleeps.append)
-    with lock_held(ctx.dialect.conninfo, "npd.practitioner"):
+    with lock_held(ctx.dsn, "npd.practitioner"):
         start = time.monotonic()
         warnings = apply_retention(ctx, RELEASES[-1])
         elapsed = time.monotonic() - start

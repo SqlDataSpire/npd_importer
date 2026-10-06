@@ -1,4 +1,4 @@
--- Each release partition is itself partitioned BY LIST (resource_type); see raw_load.py.
+-- Each release partition is itself partitioned BY LIST (resource_type); see dialect/postgres.py.
 CREATE TABLE IF NOT EXISTS <<raw_schema>>.resource (
     release_date    date        NOT NULL,
     resource_type   text        NOT NULL,

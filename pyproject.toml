@@ -9,7 +9,6 @@ description = "Load the CMS National Provider Directory FHIR bulk release into P
 requires-python = ">=3.12"
 dependencies = [
     "Python-DataEngine>=2.4",
-    "psycopg[binary]>=3.1",
     "zstandard>=0.22",
     "httpx>=0.27",
 ]

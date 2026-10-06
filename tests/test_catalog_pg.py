@@ -1,19 +1,12 @@
 from datetime import date
 
-import psycopg
 import pytest
 
 from catalog_contract import CatalogContract, cfg
-from sqlalchemy import create_engine
+from pg_helpers import connect, pg_engine
 
 from npd_loader.catalog import FAILED, SUCCESS, SqlCatalog
 from npd_loader.config import CatalogConfig
-
-
-def pg_engine(conninfo: str):
-    from psycopg.conninfo import conninfo_to_dict
-    d = conninfo_to_dict(conninfo)
-    return create_engine(f"postgresql+psycopg2://{d['user']}:{d['password']}@{d['host']}:{d['port']}/{d['dbname']}")
 
 
 def catalog_config() -> CatalogConfig:
@@ -34,7 +27,7 @@ def test_writes_configured_labels(catalog_db):
     catalog.finish_run(run, SUCCESS, result=None, output_xml="<WAREHOUSE_RUN_OUTPUT />")
     failed = catalog.start_run("IMPORT", "x", cfg(date(2026, 9, 29)))
     catalog.finish_run(failed, FAILED, result="y" * 9000)
-    with psycopg.connect(catalog_db) as conn:
+    with connect(catalog_db) as conn:
         row = conn.execute("SELECT project, run_type, run_class, run_description, completion_status, "
                            "date_completed IS NOT NULL, parent_run_id FROM master_warehouse_run WHERE id = %s",
                            (run.id,)).fetchone()
@@ -47,7 +40,7 @@ def test_writes_configured_labels(catalog_db):
 
 
 def test_other_projects_runs_are_ignored(catalog_db):
-    with psycopg.connect(catalog_db) as conn:
+    with connect(catalog_db) as conn:
         conn.execute("INSERT INTO master_warehouse_run (project, run_type, run_class, xml_config, completion_status) "
                      "VALUES ('OTHER', 'National Provider Directory', 'DOWNLOAD', %s, 'Success')",
                      (cfg(date(2026, 9, 29)),))

@@ -10,7 +10,8 @@ CFG = NpdDbConfig(connection="data", raw_schema="npd_raw", schema="npd")
 def test_postgres_dialect_selected():
     pg = build_connection("pg", {"type": "postgres", "server": "h:5432", "database": "npd", "UN": "u", "PW": "p"})
     d = dialect_for(pg, CFG)
-    assert d.name == "postgres" and d.conninfo == "postgresql://u:p@h:5432/npd"
+    assert d.name == "postgres" and d.engine is pg.engine and d.cfg is CFG
+    assert d.engine.url.render_as_string(hide_password=False) == "postgresql+psycopg2://u:p@h:5432/npd"
 
 
 def test_unknown_engine_rejected():

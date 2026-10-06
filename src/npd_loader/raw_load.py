@@ -1,28 +1,16 @@
-"""IMPORT, raw part: stream each .ndjson into a standalone raw table with COPY, strictly validated.
+"""IMPORT, raw part: the engine-neutral pieces of the raw load (line reading and strict validation).
 
-Layout built here (not visible to readers until publish.py attaches it):
-  {raw}.resource__YYYYMMDD__rRUN                 PARTITION BY LIST (resource_type)
-  {raw}.resource__YYYYMMDD__rRUN__practitioner   one leaf per file, CHECKed on release_date and resource_type
+Each dialect streams every .ndjson into its standalone raw table (dialect/postgres.py: one COPY leaf per file;
+dialect/mssql.py: batched inserts).
 """
 from __future__ import annotations
 
 import json
-import logging
 import re
 from dataclasses import dataclass
-from datetime import date
 from typing import BinaryIO, Iterator
 
-import psycopg
-from psycopg import sql
-
-from npd_loader.db import MAX_IDENTIFIER, clone_parent_indexes, standalone_name
-from npd_loader.storage import Storage
-
-log = logging.getLogger(__name__)
 RAW_PARENT = "resource"
-COLUMNS = ("release_date", "resource_type", "resource_id", "last_updated", "ndjson_file_id", "zst_file_id",
-           "line_number", "resource")
 # A \u0000 escape in JSON text: "u0000" after an odd number of backslashes. After an even number it is just
 # escaped backslashes followed by the text "u0000", which jsonb stores fine.
 NUL_ESCAPE_RE = re.compile(r"(?<!\\)(?:\\\\)*\\u0000")
@@ -83,74 +71,3 @@ def validate_line(text: str, number: int, expected_type: str) -> tuple[str, str 
     meta = obj.get("meta")
     last_updated = meta.get("lastUpdated") if isinstance(meta, dict) else None
     return resource_id, last_updated if isinstance(last_updated, str) else None
-
-
-def _create_release_table(conn: psycopg.Connection, raw_schema: str, release: date, run_id: int) -> str:
-    name = standalone_name(RAW_PARENT, release, run_id)
-    conn.execute(sql.SQL("CREATE TABLE {} (LIKE {} INCLUDING DEFAULTS) PARTITION BY LIST (resource_type)").format(
-        sql.Identifier(raw_schema, name), sql.Identifier(raw_schema, RAW_PARENT)))
-    conn.commit()
-    return name
-
-
-def _load_file(conn: psycopg.Connection, storage: Storage, raw_schema: str, table: str, release: date,
-               inp: NdjsonInput) -> int:
-    leaf = f"{table}__{inp.resource_type.lower()}"
-    if len(leaf) > MAX_IDENTIFIER:
-        raise RawLoadError(f"table name {leaf!r} is too long", inp.file_id)
-    leaf_id = sql.Identifier(raw_schema, leaf)
-    conn.execute(sql.SQL("CREATE TABLE {} (LIKE {} INCLUDING DEFAULTS)").format(
-        leaf_id, sql.Identifier(raw_schema, RAW_PARENT)))
-    conn.execute(sql.SQL("ALTER TABLE {} ADD CHECK (release_date = {} AND resource_type = {})").format(
-        leaf_id, sql.Literal(release), sql.Literal(inp.resource_type)))
-    lines = 0
-    copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(leaf_id, sql.SQL(", ").join(map(sql.Identifier, COLUMNS)))
-    try:
-        with storage.open_read(inp.rel_path) as f, conn.cursor() as cur, cur.copy(copy_sql) as copy:
-            for number, text in iter_lines(f):
-                resource_id, last_updated = validate_line(text, number, inp.resource_type)
-                copy.write_row((release, inp.resource_type, resource_id, last_updated, inp.file_id,
-                                inp.zst_file_id, number, text))
-                lines += 1
-    except RawLoadError as exc:
-        conn.rollback()
-        raise RawLoadError(f"{inp.name}: {exc}", inp.file_id) from exc
-    except psycopg.Error as exc:
-        conn.rollback()
-        raise RawLoadError(f"{inp.name}: COPY failed: {exc}", inp.file_id) from exc
-    except OSError as exc:
-        conn.rollback()
-        raise RawLoadError(f"{inp.name}: cannot read {inp.rel_path}: {exc}", inp.file_id) from exc
-    count = conn.execute(sql.SQL("SELECT count(*) FROM {}").format(leaf_id)).fetchone()[0]
-    if count != lines:
-        conn.rollback()
-        raise RawLoadError(f"{inp.name}: read {lines} lines but loaded {count} rows", inp.file_id)
-    conn.execute(sql.SQL("ALTER TABLE {} ATTACH PARTITION {} FOR VALUES IN ({})").format(
-        sql.Identifier(raw_schema, table), leaf_id, sql.Literal(inp.resource_type)))
-    conn.commit()
-    log.info("loaded %d %s resources from %s", lines, inp.resource_type, inp.rel_path)
-    return lines
-
-
-def _index_and_check_duplicates(conn: psycopg.Connection, raw_schema: str, table: str,
-                                file_ids: dict[str, int]) -> None:
-    """`file_ids` maps resource_type to its .ndjson data_file id, so the error names the file to blame."""
-    target = sql.Identifier(raw_schema, table)
-    try:
-        clone_parent_indexes(conn, raw_schema, RAW_PARENT, target)
-        conn.commit()
-    except psycopg.errors.UniqueViolation:
-        conn.rollback()
-        dups = conn.execute(sql.SQL(
-            "SELECT resource_type, resource_id, array_agg(line_number ORDER BY line_number) FROM {} "
-            "GROUP BY 1, 2 HAVING count(*) > 1 ORDER BY 1, 2 LIMIT 20").format(target)).fetchall()
-        detail = "; ".join(f"{t} {i} at lines {lines}" for t, i, lines in dups)
-        raise RawLoadError(f"duplicate resource ids: {detail}", file_ids.get(dups[0][0]) if dups else None)
-
-
-def load_raw(conn: psycopg.Connection, storage: Storage, raw_schema: str, release: date, run_id: int,
-             inputs: list[NdjsonInput]) -> RawLoadResult:
-    table = _create_release_table(conn, raw_schema, release, run_id)
-    rows = {inp.resource_type: _load_file(conn, storage, raw_schema, table, release, inp) for inp in inputs}
-    _index_and_check_duplicates(conn, raw_schema, table, {inp.resource_type: inp.file_id for inp in inputs})
-    return RawLoadResult(table, rows)

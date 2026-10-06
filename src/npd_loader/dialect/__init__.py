@@ -51,7 +51,6 @@ def dialect_for(conn_obj: object, cfg: NpdDbConfig, sleep: Callable[[float], Non
         from npd_loader.dialect.mssql import MssqlDialect
         return MssqlDialect(conn_obj.engine, cfg, sleep)
     if name == "postgresql":
-        from npd_loader.connections import pg_conninfo
         from npd_loader.dialect.postgres import PostgresDialect
-        return PostgresDialect(pg_conninfo(conn_obj), cfg, sleep)
+        return PostgresDialect(conn_obj.engine, cfg, sleep)
     raise ValueError(f"unsupported database engine {name!r}")

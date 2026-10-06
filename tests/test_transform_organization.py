@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 
-import psycopg
 import pytest
 
 from npd_loader.storage import LocalStorage
-from pg_helpers import rows, transformed
+from helpers import pg_dialect
+from pg_helpers import open_conn, rows, transformed
 
 O1, O2 = "Organization-1336200294", "Organization-1902099112"
 L1 = "Location-00027861-c380-4866-b677-4c28e4ceaf6b"
@@ -13,8 +13,8 @@ E1 = "Endpoint-000f410c-e1e9-4a78-a988-b6ce47d6a793"
 
 @pytest.fixture
 def result(npd_db, tmp_path):
-    conn = psycopg.connect(npd_db)
-    res = transformed(conn, LocalStorage(tmp_path / "data"))
+    res = transformed(pg_dialect(npd_db), LocalStorage(tmp_path / "data"))
+    conn = open_conn(npd_db)
     yield conn, res
     conn.close()
 

@@ -1,10 +1,10 @@
 from datetime import datetime, timezone
 
-import psycopg
 import pytest
 
 from npd_loader.storage import LocalStorage
-from pg_helpers import R, rows, transformed
+from helpers import pg_dialect
+from pg_helpers import R, open_conn, rows, transformed
 
 NPI = "http://terminology.hl7.org/NamingSystem/npi"
 TAX = "http://hl7.org/fhir/us/ndh/ValueSet/HealthcareIndividualTaxonomyVS"
@@ -17,8 +17,8 @@ def utc(*args):
 
 @pytest.fixture
 def result(npd_db, tmp_path):
-    conn = psycopg.connect(npd_db)
-    res = transformed(conn, LocalStorage(tmp_path / "data"))
+    res = transformed(pg_dialect(npd_db), LocalStorage(tmp_path / "data"))
+    conn = open_conn(npd_db)
     yield conn, res
     conn.close()
 

@@ -1,7 +1,7 @@
 import pytest
 
 from npd_loader.config import ConfigError
-from npd_loader.connections import build_connection, pg_conninfo, read_env_file
+from npd_loader.connections import build_connection, read_env_file
 from helpers import write_env_file
 
 DOCS = {"data": {"type": "mssql", "server": "cssnpi", "database": "npd_dev", "trusted": "yes"},
@@ -27,7 +27,8 @@ def test_build_connection_types_and_no_stdout(capsys):
     assert mssql.engine.dialect.name == "mssql"
     pg = build_connection("pg", DOCS["pg"])
     assert type(pg).__name__ == "PgConnectionObject"
-    assert pg_conninfo(pg) == "postgresql://u:p%40ss@db.example:5433/npd"
+    assert pg.engine.dialect.name == "postgresql" and pg.engine.dialect.driver == "psycopg2"
+    assert pg.engine.url.render_as_string(hide_password=False) == "postgresql+psycopg2://u:p%40ss@db.example:5433/npd"
     assert capsys.readouterr().out == ""
     with pytest.raises(ConfigError, match="type"):
         build_connection("m", {"type": "mongo", "server": "x", "database": "y"})

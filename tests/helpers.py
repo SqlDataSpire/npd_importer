@@ -41,11 +41,13 @@ def make_ctx(tmp_path: Path, cms, catalog=None, dialect=None, **config_kw) -> Co
                    dialect=dialect, sleep=lambda seconds: None)
 
 
-def pg_dialect(conninfo: str):
+def pg_dialect(dsn: str, sleep=lambda s: None, **cfg_kw):
+    """PostgresDialect for the npd_raw/npd schemas of the test database at libpq DSN `dsn`."""
     from npd_loader.config import NpdDbConfig
     from npd_loader.dialect.postgres import PostgresDialect
-    return PostgresDialect(conninfo, NpdDbConfig(connection="data", raw_schema="npd_raw", schema="npd"),
-                           sleep=lambda s: None)
+    from pg_helpers import pg_engine
+    return PostgresDialect(pg_engine(dsn), NpdDbConfig(connection="data", raw_schema="npd_raw", schema="npd",
+                                                       **cfg_kw), sleep=sleep)
 
 
 def to_toml(data: dict) -> str:

@@ -1,20 +1,22 @@
 import copy
 from datetime import date, timedelta
 
-import psycopg
-
 from npd_loader.catalog import SqlCatalog
 from npd_loader.cli import main
 from npd_loader.config import parse_config
-from npd_loader.db import list_release_partitions
+from npd_loader.dialect.postgres import PostgresDialect
 from npd_loader.storage import LocalStorage
 import fixture_data
-from helpers import config_data, to_toml
-from test_catalog_pg import pg_engine
+from helpers import config_data, to_toml, write_env_file
+from pg_helpers import connect, pg_doc, pg_engine
 from release_builder import build_release
 
 BASE = date(2026, 8, 4)
 ORG1 = fixture_data.ORG1["id"]
+
+
+def list_release_partitions(conn, schema, parent):
+    return PostgresDialect.release_partitions(conn.raw, schema, parent)
 
 
 def publish(cms, week: int) -> date:
@@ -27,8 +29,8 @@ def publish(cms, week: int) -> date:
 
 def test_six_releases_end_to_end(tmp_path, cms, make_db, catalog_db):
     npd = make_db()
-    data = config_data(tmp_path / "data", cms.manifest_url, npd_conninfo=npd, catalog_conninfo=catalog_db,
-                       keep_releases=5)
+    env = write_env_file(tmp_path / "database.env", {"data": pg_doc(npd), "catalog": pg_doc(catalog_db)})
+    data = config_data(tmp_path / "data", cms.manifest_url, env_file=env, keep_releases=5)
     config_path = tmp_path / "config.toml"
     config_path.write_text(to_toml(data))
     catalog = SqlCatalog(pg_engine(catalog_db), parse_config(data).catalog)
@@ -38,12 +40,12 @@ def test_six_releases_end_to_end(tmp_path, cms, make_db, catalog_db):
         return main(["--config", str(config_path), *args])
 
     def raw_pairs():
-        with psycopg.connect(npd) as conn:
+        with connect(npd) as conn:
             return set(conn.execute("SELECT DISTINCT ndjson_file_id, zst_file_id FROM npd_raw.resource "
                                     "WHERE release_date = %s", (r1,)).fetchall())
 
     def run_count():
-        with psycopg.connect(catalog_db) as conn:
+        with connect(catalog_db) as conn:
             return conn.execute("SELECT count(*) FROM master_warehouse_run").fetchone()[0]
 
     assert cli("init-db") == 0
@@ -63,7 +65,7 @@ def test_six_releases_end_to_end(tmp_path, cms, make_db, catalog_db):
 
     # forced import replaces the partitions
     assert cli("import", "--force") == 0
-    with psycopg.connect(npd) as conn:
+    with connect(npd) as conn:
         assert list(list_release_partitions(conn, "npd", "practitioner")) == [r1]
 
     # deleted .ndjson is re-extracted in place with the same data_file id
@@ -79,7 +81,7 @@ def test_six_releases_end_to_end(tmp_path, cms, make_db, catalog_db):
     for week in range(1, 6):
         releases[week] = publish(cms, week)
         assert cli("run") == 0
-    with psycopg.connect(npd) as conn:
+    with connect(npd) as conn:
         assert sorted(list_release_partitions(conn, "npd_raw", "resource")) == releases[1:]
         assert sorted(list_release_partitions(conn, "npd", "practitioner")) == releases[1:]
         assert [r[0] for r in conn.execute("SELECT release_date FROM npd.release ORDER BY 1")] == releases[1:]
