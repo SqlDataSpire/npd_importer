@@ -56,3 +56,19 @@ def test_organization_location_endpoint(result):
     assert rows(d, res, "organization_endpoint", "endpoint_id", "resource_id, seq") == \
         [("Endpoint-000f410c-e1e9-4a78-a988-b6ce47d6a793",)]
     assert res.counts["location"] >= 1 and res.counts["endpoint"] >= 1
+
+
+def test_every_table_gets_rows(result):
+    d, res = result
+    empty = sorted(t for t, n in res.counts.items() if n == 0)
+    assert empty == [], f"no rows in {empty}"
+
+
+def test_roles_and_identifier(result):
+    d, res = result
+    role = rows(d, res, "practitioner_role", "practitioner_id, organization_id")
+    assert role and all(p and p.startswith("Practitioner-") for p, _ in role)
+    ids = rows(d, res, "identifier", "resource_type, resource_id, seq, [system], [value]",
+               "resource_type, resource_id, seq")
+    assert ("Organization", "Organization-1336200294", 1, "http://terminology.hl7.org/NamingSystem/npi",
+            "1336200294") in ids
