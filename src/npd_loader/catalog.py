@@ -1,13 +1,12 @@
-"""Run and file tracking. `Catalog` is the interface; CssCatalogPg (below) writes css_catalog_local."""
+"""Run and file tracking. `Catalog` is the interface; SqlCatalog writes it through SQLAlchemy."""
 from __future__ import annotations
 
 from dataclasses import dataclass, fields as dc_fields
 from datetime import date, datetime
 from typing import Iterable, Protocol
 
-import psycopg
-from psycopg import sql
-from psycopg.rows import dict_row
+from sqlalchemy import BigInteger, Column, DateTime, Integer, MetaData, String, Table, Text, and_, insert, select, update
+from sqlalchemy.engine import Engine
 
 from npd_loader.config import CatalogConfig
 from npd_loader.runxml import parse_release
@@ -83,74 +82,90 @@ class Catalog(Protocol):
     def successful_releases(self, run_class: str) -> list[date]: ...
 
 
-def _qualified(name: str) -> sql.Identifier:
-    return sql.Identifier(*name.split(".", 1))
+def _table(md: MetaData, qualified: str, *columns: Column) -> Table:
+    schema, _, name = qualified.rpartition(".")
+    return Table(name, md, *columns, schema=schema or None)
 
 
-class CssCatalogPg:
-    """Catalog in css_catalog_local. Each call uses its own short autocommit connection, so catalog writes
-    commit independently of data loads and survive their failures."""
+class SqlCatalog:
+    """Catalog in any SQLAlchemy engine (css_catalog_local on Postgres, HIE_WAREHOUSE_META on SQL Server). Each call
+    runs in its own short transaction, so catalog writes commit independently of data loads and survive their
+    failures. Column names are lowercase; SQL Server's case-insensitive collation matches the uppercase columns."""
 
-    def __init__(self, conninfo: str, cfg: CatalogConfig):
-        self._conninfo = conninfo
+    def __init__(self, engine: Engine, cfg: CatalogConfig):
+        self._engine = engine
         self._cfg = cfg
-        self._runs = _qualified(cfg.run_table)
-        self._files = _qualified(cfg.file_table)
-
-    def _connect(self) -> psycopg.Connection:
-        return psycopg.connect(self._conninfo, autocommit=True)
+        md = MetaData()
+        self._runs = _table(md, cfg.run_table,
+                            Column("id", Integer, primary_key=True), Column("project", String),
+                            Column("run_type", String), Column("run_class", String),
+                            Column("run_description", String), Column("xml_config", Text),
+                            Column("xml_output", Text), Column("date_started", DateTime),
+                            Column("date_completed", DateTime), Column("completion_status", String),
+                            Column("result", String))
+        self._files = _table(md, cfg.file_table,
+                             Column("id", Integer, primary_key=True), Column("run_id", Integer),
+                             Column("file_set", String), Column("source_version_name", String),
+                             Column("file_type", String), Column("source_uri", String),
+                             Column("source_version_num", String), Column("file_name", String),
+                             Column("file_rel_path", String), Column("run_type_root_dir", String),
+                             Column("parent_file", Integer), Column("file_size", BigInteger),
+                             Column("file_hash", String), Column("date_modified", DateTime),
+                             Column("date_created", DateTime), Column("date_loaded", DateTime),
+                             Column("exceptions", String))
 
     def start_run(self, run_class: str, description: str, config_xml: str) -> Run:
         started = datetime.now().replace(microsecond=0)
-        query = sql.SQL("INSERT INTO {} (project, run_type, run_class, run_description, xml_config, date_started) "
-                        "VALUES (%s, %s, %s, %s, %s, %s) RETURNING id").format(self._runs)
-        with self._connect() as conn:
-            run_id = conn.execute(query, (self._cfg.project, self._cfg.run_type, run_class, description,
-                                          config_xml, started)).fetchone()[0]
+        stmt = insert(self._runs).values(project=self._cfg.project, run_type=self._cfg.run_type,
+                                         run_class=run_class, run_description=description,
+                                         xml_config=config_xml, date_started=started).returning(self._runs.c.id)
+        with self._engine.begin() as conn:
+            run_id = conn.execute(stmt).scalar_one()
         return Run(run_id, run_class, description, config_xml, started, parse_release(config_xml))
 
     def finish_run(self, run: Run, status: str, result: str | None = None, output_xml: str | None = None) -> None:
         label = {SUCCESS: self._cfg.status_success, FAILED: self._cfg.status_failed}[status]
-        query = sql.SQL("UPDATE {} SET completion_status = %s, date_completed = %s, result = %s, xml_output = %s "
-                        "WHERE id = %s").format(self._runs)
-        with self._connect() as conn:
-            conn.execute(query, (label, datetime.now().replace(microsecond=0), truncate(result, MAX_RESULT), output_xml, run.id))
+        stmt = update(self._runs).where(self._runs.c.id == run.id).values(
+            completion_status=label, date_completed=datetime.now().replace(microsecond=0),
+            result=truncate(result, MAX_RESULT), xml_output=output_xml)
+        with self._engine.begin() as conn:
+            conn.execute(stmt)
 
     def add_data_file(self, run: Run, **fields: object) -> int:
         fields = clean_fields(fields)
-        cols = ["run_id", "file_set", "source_version_name", *fields]
-        vals = [run.id, self._cfg.file_set, self._cfg.source_version_name, *fields.values()]
-        query = sql.SQL("INSERT INTO {} ({}) VALUES ({}) RETURNING id").format(
-            self._files, sql.SQL(", ").join(map(sql.Identifier, cols)),
-            sql.SQL(", ").join([sql.Placeholder()] * len(cols)))
-        with self._connect() as conn:
-            return conn.execute(query, vals).fetchone()[0]
+        stmt = insert(self._files).values(run_id=run.id, file_set=self._cfg.file_set,
+                                          source_version_name=self._cfg.source_version_name,
+                                          **fields).returning(self._files.c.id)
+        with self._engine.begin() as conn:
+            return conn.execute(stmt).scalar_one()
 
     def update_data_file(self, file_id: int, **fields: object) -> None:
         fields = clean_fields(fields)
         if not fields:
             return
-        sets = sql.SQL(", ").join(sql.SQL("{} = %s").format(sql.Identifier(k)) for k in fields)
-        query = sql.SQL("UPDATE {} SET {} WHERE id = %s").format(self._files, sets)
-        with self._connect() as conn:
-            conn.execute(query, [*fields.values(), file_id])
+        with self._engine.begin() as conn:
+            conn.execute(update(self._files).where(self._files.c.id == file_id).values(**fields))
 
     def get_data_files(self, release: date, file_type: str, run_id: int | None = None) -> list[DataFile]:
-        cols = sql.SQL(", ").join(map(sql.Identifier, ["id", "run_id", *DATA_FILE_FIELDS]))
-        query = sql.SQL("SELECT {} FROM {} WHERE file_set = %s AND source_version_num = %s AND file_type = %s "
-                        "AND (%s::integer IS NULL OR run_id = %s) ORDER BY id").format(cols, self._files)
-        with self._connect() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(query, (self._cfg.file_set, release.isoformat(), file_type, run_id, run_id))
-            return [DataFile(**row) for row in cur.fetchall()]
+        f = self._files.c
+        cond = and_(f.file_set == self._cfg.file_set, f.source_version_num == release.isoformat(),
+                    f.file_type == file_type)
+        if run_id is not None:
+            cond = and_(cond, f.run_id == run_id)
+        cols = [f.id, f.run_id, *(f[name] for name in DATA_FILE_FIELDS)]
+        with self._engine.connect() as conn:
+            rows = conn.execute(select(*cols).where(cond).order_by(f.id)).mappings().all()
+        return [DataFile(**row) for row in rows]
 
     def _successful_runs(self, run_class: str) -> list[Run]:
-        query = sql.SQL("SELECT id, run_class, run_description, xml_config::text, date_started, "
-                        "completion_status FROM {} WHERE project = %s AND run_type = %s AND run_class = %s "
-                        "AND completion_status = %s").format(self._runs)
-        with self._connect() as conn:
-            rows = conn.execute(query, (self._cfg.project, self._cfg.run_type, run_class,
-                                        self._cfg.status_success)).fetchall()
-        return [Run(r[0], r[1], r[2] or "", r[3] or "", r[4], parse_release(r[3]), SUCCESS) for r in rows]
+        r = self._runs.c
+        stmt = select(r.id, r.run_class, r.run_description, r.xml_config, r.date_started).where(
+            r.project == self._cfg.project, r.run_type == self._cfg.run_type, r.run_class == run_class,
+            r.completion_status == self._cfg.status_success)
+        with self._engine.connect() as conn:
+            rows = conn.execute(stmt).all()
+        return [Run(row[0], row[1], row[2] or "", row[3] or "", row[4], parse_release(row[3]), SUCCESS)
+                for row in rows]
 
     def last_successful_run(self, run_class: str, release: date | None = None) -> Run | None:
         return newest_run(self._successful_runs(run_class), release)

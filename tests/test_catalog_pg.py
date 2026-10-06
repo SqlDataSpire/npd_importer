@@ -4,23 +4,31 @@ import psycopg
 import pytest
 
 from catalog_contract import CatalogContract, cfg
-from npd_loader.catalog import FAILED, SUCCESS, CssCatalogPg
+from sqlalchemy import create_engine
+
+from npd_loader.catalog import FAILED, SUCCESS, SqlCatalog
 from npd_loader.config import CatalogConfig
 
 
+def pg_engine(conninfo: str):
+    from psycopg.conninfo import conninfo_to_dict
+    d = conninfo_to_dict(conninfo)
+    return create_engine(f"postgresql+psycopg2://{d['user']}:{d['password']}@{d['host']}:{d['port']}/{d['dbname']}")
+
+
 def catalog_config() -> CatalogConfig:
-    return CatalogConfig(backend="css_catalog_pg", host="unused", port=0, dbname="unused", user=None,
-                         password=None, project="NPD", run_type="National Provider Directory", file_set="NPD_FHIR")
+    return CatalogConfig(connection="catalog", project="NPD", run_type="National Provider Directory",
+                         file_set="NPD_FHIR")
 
 
-class TestCssCatalogPg(CatalogContract):
+class TestSqlCatalogPg(CatalogContract):
     @pytest.fixture
     def catalog(self, catalog_db):
-        return CssCatalogPg(catalog_db, catalog_config())
+        return SqlCatalog(pg_engine(catalog_db), catalog_config())
 
 
 def test_writes_configured_labels(catalog_db):
-    catalog = CssCatalogPg(catalog_db, catalog_config())
+    catalog = SqlCatalog(pg_engine(catalog_db), catalog_config())
     run = catalog.start_run("DOWNLOAD", "NPD FHIR Download 2026-09-29", cfg(date(2026, 9, 29)))
     fid = catalog.add_data_file(run, file_type="manifest", source_version_num="2026-09-29")
     catalog.finish_run(run, SUCCESS, result=None, output_xml="<WAREHOUSE_RUN_OUTPUT />")
@@ -43,5 +51,5 @@ def test_other_projects_runs_are_ignored(catalog_db):
         conn.execute("INSERT INTO master_warehouse_run (project, run_type, run_class, xml_config, completion_status) "
                      "VALUES ('OTHER', 'National Provider Directory', 'DOWNLOAD', %s, 'Success')",
                      (cfg(date(2026, 9, 29)),))
-    catalog = CssCatalogPg(catalog_db, catalog_config())
+    catalog = SqlCatalog(pg_engine(catalog_db), catalog_config())
     assert catalog.last_successful_run("DOWNLOAD") is None

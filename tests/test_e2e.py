@@ -3,13 +3,14 @@ from datetime import date, timedelta
 
 import psycopg
 
-from npd_loader.catalog import CssCatalogPg
+from npd_loader.catalog import SqlCatalog
 from npd_loader.cli import main
 from npd_loader.config import parse_config
 from npd_loader.db import list_release_partitions
 from npd_loader.storage import LocalStorage
 import fixture_data
 from helpers import config_data, to_toml
+from test_catalog_pg import pg_engine
 from release_builder import build_release
 
 BASE = date(2026, 8, 4)
@@ -30,7 +31,7 @@ def test_six_releases_end_to_end(tmp_path, cms, make_db, catalog_db):
                        keep_releases=5)
     config_path = tmp_path / "config.toml"
     config_path.write_text(to_toml(data))
-    catalog = CssCatalogPg(catalog_db, parse_config(data).catalog)
+    catalog = SqlCatalog(pg_engine(catalog_db), parse_config(data).catalog)
     storage = LocalStorage(tmp_path / "data")
 
     def cli(*args):
