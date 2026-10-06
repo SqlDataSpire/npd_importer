@@ -39,11 +39,12 @@ def test_init_db_is_idempotent(mssql_dialect):
 def test_helper_functions(mssql_dialect):
     d = mssql_dialect
     s = d.q(d.cfg.schema)
-    res = '{"extension": [{"url": "a", "valueBoolean": true}], "identifier": [{"system": "x", "value": "1"}, {"system": "npi", "value": "2"}], "name": ["A", "B", "C"]}'
+    res = '{"name": ["A", "B", "C"]}'
     assert scalar(d, f"SELECT {s}.ref_id('Organization/Organization-1')") == "Organization-1"
     assert scalar(d, f"SELECT {s}.ref_id(NULL)") is None
-    assert scalar(d, f"SELECT JSON_VALUE(e.ext, '$.valueBoolean') FROM {s}.ext(?, 'a') e", res) == "true"
-    assert scalar(d, f"SELECT v.value FROM {s}.identifier_value(?, '[\"npi\",\"y\"]') v", res) == "2"
+    # ext() and identifier_value() are gone: the transforms parse each document once and look these up inline.
+    assert scalar(d, f"SELECT count(*) FROM sys.objects WHERE schema_id = SCHEMA_ID(?) AND name IN ('ext', "
+                     f"'identifier_value')", d.cfg.schema) == 0
     assert scalar(d, f"SELECT j.txt FROM {s}.join_text(JSON_QUERY(?, '$.name'), ' ', 0) j", res) == "A B C"
     assert scalar(d, f"SELECT j.txt FROM {s}.join_text(JSON_QUERY(?, '$.name'), ', ', 2) j", res) == "C"
     assert scalar(d, f"SELECT j.txt FROM {s}.join_text(NULL, ' ', 0) j") is None

@@ -40,7 +40,10 @@ Logs go to stderr; redirect them in a wrapper `.cmd` if you need a file.
 ### How it works on SQL Server
 
 Raw lines go into `npd_raw.resource` (`varchar(max)` with a UTF-8 collation), in batches of 5,000 rows, each committed
-as it lands, into a standalone table for the release. T-SQL transforms (`OPENJSON`) fill standalone `npd.*` tables.
+as it lands, into a standalone table for the release. T-SQL transforms (`OPENJSON`) fill standalone `npd.*` tables:
+each script parses its resource type once into a scratch stage table, in chunks of 200,000 resources, and fills its
+tables from the stage. `tests\mssql_bench.py` times them on a sample of a real raw table (see
+`docs/profile/2026-10-06-mssql-transform-benchmark.md`).
 Publish switches every standalone table into its parent's release partition in one transaction (`SPLIT RANGE`,
 `SWITCH`); retention switches old partitions out and `MERGE`s their boundaries. The run lock is `sp_getapplock`.
 

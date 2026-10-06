@@ -72,3 +72,17 @@ def test_roles_and_identifier(result):
                "resource_type, resource_id, seq")
     assert ("Organization", "Organization-1336200294", 1, "http://terminology.hl7.org/NamingSystem/npi",
             "1336200294") in ids
+
+
+def test_chunked_run_matches_one_pass(result):
+    """Chunks of one resource each (run 8) give the same rows as one pass per script (run 7)."""
+    d, res = result
+    d.chunk_rows = 1
+    chunked = d.run_transforms(f"resource__{R:%Y%m%d}__r7", R, 8)
+    assert chunked.counts == res.counts
+    for parent, name in res.tables.items():
+        a, b = d.q(d.cfg.schema, name), d.q(d.cfg.schema, chunked.tables[parent])
+        assert fetch(d, f"SELECT count(*) FROM (SELECT * FROM {a} EXCEPT SELECT * FROM {b}) x")[0][0] == 0, parent
+    stages = fetch(d, "SELECT count(*) FROM sys.tables WHERE schema_id = SCHEMA_ID(?) AND name LIKE 'stage[_]%'",
+                   d.cfg.schema)
+    assert stages[0][0] == 0

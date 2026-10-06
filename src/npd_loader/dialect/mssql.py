@@ -27,6 +27,10 @@ ERROR_NUMBER_RE = re.compile(r"\((\d+)\)")
 LOCK_ATTEMPTS = 3
 LOCK_BACKOFF_SECONDS = 2.0
 STANDALONE_RE = r"__r{run}(__[a-z]+)?$"
+# A transform script with this line runs once per chunk of CHUNK_ROWS resources of that type, <<chunk>> rendered
+# to the chunk's predicate on the raw table (alias r).
+CHUNK_RE = re.compile(r"^-- chunked: ([A-Za-z]+)[ \t]*\r?$", re.MULTILINE)
+CHUNK_ROWS = 200_000
 T = TypeVar("T")
 
 
@@ -48,6 +52,7 @@ def to_utc_naive(text: str | None) -> datetime | None:
 
 class MssqlDialect:
     name = "mssql"
+    chunk_rows = CHUNK_ROWS
 
     def __init__(self, engine: Engine, cfg: NpdDbConfig, sleep: Callable[[float], None] = time.sleep):
         self.engine = engine
@@ -225,18 +230,55 @@ class MssqlDialect:
             raise RawLoadError(f"duplicate resource ids: {detail}", file_ids.get(dups[0][0]) if dups else None) from exc
         return RawLoadResult(table, rows)
 
+    def _chunks(self, raw: str, release: date, resource_type: str) -> list[str]:
+        """<<chunk>> predicates splitting the `resource_type` rows of `raw` into resource_id ranges of chunk_rows rows
+        (one seek each on resource_key), so a script's stage heap stays small enough to be read back from memory."""
+        with self.engine.connect() as conn:
+            starts = [r[0] for r in conn.exec_driver_sql(
+                f"SELECT resource_id FROM (SELECT resource_id, ROW_NUMBER() OVER (ORDER BY resource_id) - 1 AS n "
+                f"FROM {raw} WHERE release_date = ? AND resource_type = ?) x WHERE n % ? = 0 ORDER BY resource_id",
+                (release, resource_type, self.chunk_rows))]
+        day = f"r.release_date = '{release.isoformat()}'"
+        if not starts:
+            return [day]
+        chunks = []
+        for i, lo in enumerate(starts):
+            chunk = f"{day} AND r.resource_id >= {self.vlit(lo)}"
+            if i + 1 < len(starts):
+                chunk += f" AND r.resource_id < {self.vlit(starts[i + 1])}"
+            chunks.append(chunk)
+        return chunks
+
+    @staticmethod
+    def vlit(value: str) -> str:
+        """varchar literal (resource_id is varchar: an N'' literal would convert the column and lose the seek)."""
+        if not value.isascii():
+            raise ValueError(f"non-ASCII resource_id {value!r}")
+        return "'" + value.replace("'", "''") + "'"
+
     def run_transforms(self, raw_table: str, release: date, run_id: int) -> TransformResult:
         schema = self.cfg.schema
         with self._autocommit() as conn:
             tables = {p: self._create_standalone(conn, schema, p, release, run_id)
                       for p in self.parent_tables(conn, schema)}
-        tokens = {"raw": self.q(self.cfg.raw_schema, raw_table), "release": f"'{release.isoformat()}'",
-                  "schema": self.q(schema), **{f"t:{p}": self.q(schema, n) for p, n in tables.items()}}
+        # <<stage:<parent>>>: a scratch heap a script parses its resource type into once and drops at its end; the
+        # __r<run> suffix lets drop_standalone_tables remove one a failed run left behind.
+        stages = {f"stage:{p}": self.q(schema, standalone_name(f"stage_{p}", release, run_id, MAX_IDENTIFIER))
+                  for p in tables}
+        raw = self.q(self.cfg.raw_schema, raw_table)
+        tokens = {"raw": raw, "release": f"'{release.isoformat()}'",
+                  "schema": self.q(schema), **{f"t:{p}": self.q(schema, n) for p, n in tables.items()}, **stages}
         for script, text in sql_scripts("mssql", "transform"):
             log.info("running transform %s", script)
-            for batch in split_batches(render(text, tokens)):
-                with self.engine.begin() as conn:          # each statement commits as soon as it lands
-                    conn.exec_driver_sql(batch)
+            directive = CHUNK_RE.search(text)
+            chunks = self._chunks(raw, release, directive.group(1)) if directive else [None]
+            for number, chunk in enumerate(chunks, 1):
+                if chunk is not None:
+                    log.debug("transform %s chunk %d of %d: %s", script, number, len(chunks), chunk)
+                batches = split_batches(render(text, tokens if chunk is None else {**tokens, "chunk": chunk}))
+                for batch in batches:
+                    with self.engine.begin() as conn:      # each statement commits as soon as it lands
+                        conn.exec_driver_sql(batch)
         counts: dict[str, int] = {}
         with self._autocommit() as conn:
             for parent, name in tables.items():

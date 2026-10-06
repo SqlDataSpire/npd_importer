@@ -51,26 +51,19 @@ BEGIN
     END
 END
 GO
--- First extension element with the given url (or no row).
-CREATE OR ALTER FUNCTION <<schema>>.ext (@resource nvarchar(max), @url nvarchar(4000)) RETURNS TABLE AS RETURN
-    SELECT TOP 1 e.value AS ext
-    FROM OPENJSON(@resource, N'$.extension') e
-    WHERE JSON_VALUE(e.value, N'$.url') = @url
-    ORDER BY CAST(e.[key] AS int)
+-- ext() and identifier_value() re-parsed the whole resource per call; the transforms now parse each document once
+-- (see transform/010_practitioner.sql) and no longer use them.
+DROP FUNCTION IF EXISTS <<schema>>.ext
 GO
--- Value of the first identifier whose system is in the JSON array @systems.
-CREATE OR ALTER FUNCTION <<schema>>.identifier_value (@resource nvarchar(max), @systems nvarchar(4000))
-RETURNS TABLE AS RETURN
-    SELECT TOP 1 JSON_VALUE(i.value, N'$.value') AS value
-    FROM OPENJSON(@resource, N'$.identifier') i
-    WHERE JSON_VALUE(i.value, N'$.system') IN (SELECT s.value FROM OPENJSON(@systems) s)
-    ORDER BY CAST(i.[key] AS int)
+DROP FUNCTION IF EXISTS <<schema>>.identifier_value
 GO
--- Join a JSON array of strings from position @skip (0-based); NULL when empty.
+-- Join a JSON array of strings from position @skip (0-based); NULL when empty. Elements are cast to nvarchar(4000)
+-- (much cheaper to sort than nvarchar(max)); every target column is narrower, so an element that long still fails
+-- the INSERT, as before.
 CREATE OR ALTER FUNCTION <<schema>>.join_text (@arr nvarchar(max), @sep nvarchar(10), @skip int)
 RETURNS TABLE AS RETURN
     -- NULLIF repeats its first argument internally, so the ordered aggregate lives in a derived table (error 8711).
     SELECT NULLIF(a.joined, N'') AS txt
-    FROM (SELECT STRING_AGG(CAST(t.value AS nvarchar(max)), @sep) WITHIN GROUP (ORDER BY CAST(t.[key] AS int)) AS joined
+    FROM (SELECT STRING_AGG(CAST(t.value AS nvarchar(4000)), @sep) WITHIN GROUP (ORDER BY CAST(t.[key] AS int)) AS joined
           FROM OPENJSON(@arr) t
           WHERE CAST(t.[key] AS int) >= @skip) a
