@@ -86,3 +86,11 @@ def test_chunked_run_matches_one_pass(result):
     stages = fetch(d, "SELECT count(*) FROM sys.tables WHERE schema_id = SCHEMA_ID(?) AND name LIKE 'stage[_]%'",
                    d.cfg.schema)
     assert stages[0][0] == 0
+
+
+def test_chunked_directive_without_token_is_an_error(result, monkeypatch):
+    d, res = result
+    monkeypatch.setattr("npd_loader.dialect.mssql.sql_scripts",
+                        lambda flavor, kind: [("099_bad.sql", "-- chunked: Practitioner\nSELECT 1\n")])
+    with pytest.raises(ValueError, match="099_bad.sql.*<<chunk>>"):
+        d.run_transforms(f"resource__{R:%Y%m%d}__r7", R, 9)

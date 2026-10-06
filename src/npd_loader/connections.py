@@ -42,11 +42,14 @@ def build_connection(name: str, doc: dict) -> object:
     for key in ("server", "database"):
         if not doc.get(key):
             raise ConfigError(f"connection {name!r} is missing {key!r}")
+    if kind == "mssql" and not doc.get("trusted") and not (doc.get("UN") and doc.get("PW")):
+        raise ConfigError(f"connection {name!r}: Windows auth only: set \"trusted\": \"yes\" "
+                          f"(or give both UN and PW for SQL authentication)")
     de = _dataengine()
     common = {"name": name, "server": doc["server"], "database": doc["database"],
               "UN": doc.get("UN", ""), "PW": doc.get("PW", "")}
     if kind == "mssql":
-        return de.SqlConnectionObject(**common, trusted=doc.get("trusted", "no"))
+        return de.SqlConnectionObject(**common, trusted=doc.get("trusted") or "no")
     return de.PgConnectionObject(**common)
 
 

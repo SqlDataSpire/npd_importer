@@ -86,6 +86,17 @@ def fail_run(ctx: Context, run: Run, exc: BaseException) -> None:
         log.exception("could not record the failure of run %s in the catalog", run.id)
 
 
+def close_interrupted_runs(ctx: Context, run_class: str) -> None:
+    """With the stage lock held no run of `run_class` is alive, so any still open was killed (SIGKILL/OOM/reboot)."""
+    try:
+        ids = ctx.catalog.fail_open_runs(run_class)
+    except Exception:
+        log.exception("could not close interrupted %s runs", run_class)
+        return
+    if ids:
+        log.warning("marked %d interrupted %s runs as failed: %s", len(ids), run_class, ", ".join(map(str, ids)))
+
+
 def sha256_of(storage: Storage, rel_path: str, chunk: int = 1 << 20) -> str:
     h = hashlib.sha256()
     with storage.open_read(rel_path) as f:

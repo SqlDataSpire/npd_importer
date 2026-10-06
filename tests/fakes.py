@@ -4,8 +4,8 @@ from __future__ import annotations
 import itertools
 from datetime import date, datetime
 
-from npd_loader.catalog import (DATA_FILE_FIELDS, MAX_RESULT, SUCCESS, DataFile, Run, clean_fields, newest_run,
-                                releases_of, truncate)
+from npd_loader.catalog import (DATA_FILE_FIELDS, FAILED, INTERRUPTED, MAX_RESULT, SUCCESS, DataFile, Run,
+                                clean_fields, newest_run, releases_of, truncate)
 from npd_loader.runxml import build_config_xml, parse_release
 
 
@@ -54,6 +54,12 @@ class FakeCatalog:
 
     def successful_releases(self, run_class: str) -> list[date]:
         return releases_of(self._successful(run_class))
+
+    def fail_open_runs(self, run_class: str) -> list[int]:
+        ids = [i for i, r in self.runs.items() if r["run_class"] == run_class and r["status"] is None]
+        for i in ids:
+            self.runs[i].update(status=FAILED, result=INTERRUPTED)
+        return ids
 
     # ---- test helpers -------------------------------------------------
     def add_successful_run(self, run_class: str, release: date) -> Run:

@@ -93,3 +93,22 @@ def test_failed_raw_load_leaves_droppable_table(mssql_dialect, tmp_path):
         load_fixture_raw(d, LocalStorage(tmp_path / "data"), ndjson={"01-Organization.ndjson": good + b"{nope\n"})
     assert count(d, d.cfg.raw_schema, "resource") == 0
     assert d.drop_standalone_tables(7) == [f"{d.cfg.raw_schema}.resource__20260929__r7"]
+
+
+def test_statistics_failure_after_commit_is_only_a_warning(mssql_dialect, mssql_engine, tmp_path, caplog):
+    from sqlalchemy import event
+
+    def refuse(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("UPDATE STATISTICS"):
+            raise RuntimeError("statistics refused")
+
+    d = mssql_dialect
+    event.listen(mssql_engine, "before_cursor_execute", refuse)
+    try:
+        with caplog.at_level("WARNING"):
+            import_release(d, tmp_path)            # must not raise
+    finally:
+        event.remove(mssql_engine, "before_cursor_execute", refuse)
+    assert d.published_releases() == [R] and d.is_published(R)
+    assert count(d, d.cfg.schema, "practitioner", R) == 2
+    assert "UPDATE STATISTICS" in caplog.text and "statistics refused" in caplog.text

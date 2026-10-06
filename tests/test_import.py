@@ -144,3 +144,16 @@ def test_no_download_fails(tmp_path, cms, npd_db):
     ctx = make_ctx(tmp_path, cms, dialect=pg_dialect(npd_db))
     with pytest.raises(StageFailed, match="no successful download"):
         run_import(ctx)
+
+
+def test_open_import_run_of_a_killed_process_is_closed(tmp_path, cms):
+    class StubDialect:
+        def drop_standalone_tables(self, run_id=None):
+            return []
+
+    ctx = make_ctx(tmp_path, cms, dialect=StubDialect())
+    dead = ctx.catalog.start_run("IMPORT", "killed", "<WAREHOUSE_RUN_CONFIG/>")
+    with pytest.raises(StageFailed, match="no successful download"):
+        run_import(ctx)
+    assert ctx.catalog.runs[dead.id]["status"] == "Failed"
+    assert ctx.catalog.runs[dead.id]["result"].startswith("interrupted")

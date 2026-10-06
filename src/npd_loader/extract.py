@@ -11,8 +11,9 @@ import zstandard
 from npd_loader.catalog import SUCCESS, DataFile, Run
 from npd_loader.manifest import parse_manifest
 from npd_loader.runxml import build_output_xml
-from npd_loader.stages import (Context, Outcome, StageFailed, completed_child, config_xml, describe, fail_run, now,
-                               original_name, prefixed_name, read_bytes, run_folder, sha256_of)
+from npd_loader.stages import (Context, Outcome, StageFailed, close_interrupted_runs, completed_child, config_xml,
+                               describe, fail_run, now, original_name, prefixed_name, read_bytes, run_folder,
+                               sha256_of)
 from npd_loader.storage import Storage
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ def run_extract(ctx: Context, release: date | None = None, force: bool = False) 
         if not acquired:
             log.info("another extract is running; nothing to do")
             return Outcome.LOCKED
+        close_interrupted_runs(ctx, cat.run_class_extract)
         download_run = ctx.catalog.last_successful_run(cat.run_class_download, release)
         if download_run is None:
             raise StageFailed(f"no successful download for release {release or '(any)'}")

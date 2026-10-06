@@ -31,4 +31,6 @@ backoff_seconds = 5
 timeout_seconds = 60
 
 [retention]
-keep_releases = 5
+# One published release; the server has limited space. During an import the new release coexists with the old one
+# until publish, so plan for ~2 copies at peak.
+keep_releases = 1

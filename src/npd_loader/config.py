@@ -173,6 +173,8 @@ def parse_config(data: dict[str, Any]) -> Config:
         download=DownloadConfig(**_optional(dl, "download", DownloadConfig)),
         retention=RetentionConfig(**_optional(ret, "retention", RetentionConfig)),
     )
+    if config.npd_db.raw_schema == config.npd_db.schema:
+        raise ConfigError("[npd_db] raw_schema and schema must differ")
     if config.npd_db.lock_timeout_seconds <= 0:
         raise ConfigError("[npd_db] lock_timeout_seconds must be greater than 0")
     if config.retention.keep_releases < 1:

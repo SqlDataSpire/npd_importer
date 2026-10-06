@@ -2,7 +2,8 @@
 
 Loads the CMS National Provider Directory FHIR bulk release into SQL Server or Postgres
 (`https://directory.cms.gov/downloads/`). On Postgres: raw JSONB in `npd_raw.resource`, flattened tables in `npd`,
-one partition per release, the newest 5 releases kept. Every run and file is recorded in `css_catalog_local` (`master_warehouse_run`, `data_file`).
+one partition per release, the newest `[retention] keep_releases` releases kept (5 by default; the example config
+sets 1, which is what the SQL Server host uses). Every run and file is recorded in `css_catalog_local` (`master_warehouse_run`, `data_file`).
 Design: `docs/superpowers/specs/2026-10-03-npd-fhir-loader-design.md`.
 
 ## SQL Server (Windows)
@@ -19,8 +20,11 @@ production (`dbo.MASTER_WAREHOUSE_RUN`, `dbo.DATA_FILE`).
 - The service account (and developers for `npd_dev`/`npd_test`): `db_owner`, or `db_ddladmin` + `db_datareader` +
   `db_datawriter` + `ALTER ANY DATASPACE`.
 - `SELECT`, `INSERT`, `UPDATE` on `dbo.MASTER_WAREHOUSE_RUN` and `dbo.DATA_FILE` in each catalog database.
-- Disk: one release used 73 GB on Postgres; page compression reduces that. Plan for several hundred GB at
-  `keep_releases = 5`.
+- Host: Microsoft ODBC Driver 17 or 18 for SQL Server installed on the machine that runs npd-loader.
+- Disk: one release is about 43 GB in the raw layer on SQL Server (page compressed; 24.9M rows, see
+  `docs/profile/2026-10-06-mssql-dev-import.md`; 73 GB on Postgres). `config.example.toml` keeps one release
+  (`keep_releases = 1`); during an import the new release coexists with the old one until publish, so plan for about
+  2 copies at peak.
 
 ### Install
 
@@ -32,10 +36,13 @@ production (`dbo.MASTER_WAREHOUSE_RUN`, `dbo.DATA_FILE`).
 
 ### Schedule (Task Scheduler)
 
-    schtasks /Create /TN "npd-loader" /SC DAILY /ST 06:00 /RU <DOMAIN\service-account> /RP *
-      /TR "C:\npd-loader\.venv\Scripts\npd-loader.exe --config C:\npd-loader\config.toml run"
+    mkdir C:\npd-loader\scripts
+    copy scripts\npd-loader-run.cmd C:\npd-loader\scripts\
+    schtasks /Create /TN "npd-loader" /SC DAILY /ST 06:00 /RU <DOMAIN\service-account> /RP * /TR "C:\npd-loader\scripts\npd-loader-run.cmd"
 
-Logs go to stderr; redirect them in a wrapper `.cmd` if you need a file.
+Logs go to stderr and Task Scheduler discards it, so the task runs `scripts\npd-loader-run.cmd`: it appends stdout and
+stderr to `C:\npd-loader\logs\npd-loader.log` (creating the folder) and exits with npd-loader's exit code, which
+Task Scheduler shows as the last run result. The wrapper finds `npd-loader.exe` in the `.venv` one folder above it, so keep it in `C:\npd-loader\scripts\` (beside the venv) or edit the path.
 
 ### How it works on SQL Server
 
@@ -68,8 +75,18 @@ sudo chmod 600 /etc/npd-loader/config.toml   # connections: see database.*.env
 
 `init-db` is idempotent. The `npd` database must already exist, and the `npd_db` user needs CREATE on it.
 
+Connections come from the env file named by `[databases] env_file`; for Postgres an entry looks like (the `npd_db`
+and `catalog` connections may be separate entries pointing at the same server):
+
+```
+databases = '{"data": {"type": "postgres", "server": "192.10.0.7:5432", "database": "npd", "UN": "npd_db", "PW": "<password>"}, "catalog": {"type": "postgres", "server": "192.10.0.7:5432", "database": "css_catalog_local", "UN": "catalog", "PW": "<password>"}}'
+```
+
+A `database.env` that holds a password must not be committed; keep it outside the repo (or `chmod 600`) and point
+`env_file` at it.
+
 **Upgrading:** re-run `npd-loader init-db` after every upgrade of npd-loader. It applies new tables and the
-idempotent schema changes in `src/npd_loader/sql/init/900_migrations.sql` (the only place post-deployment changes to
+idempotent schema changes in `src/npd_loader/sql/{postgres,mssql}/init/900_migrations.sql` (the only place post-deployment changes to
 existing tables go, as `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`), and recreates the `v_*` views automatically.
 The `catalog` user needs INSERT/UPDATE/SELECT on `master_warehouse_run` and `data_file`.
 
@@ -130,11 +147,19 @@ or cron: `0 6 * * * /opt/npd-loader/.venv/bin/npd-loader --config /etc/npd-loade
 ## Querying
 
 `npd.v_<table>` views show the newest published release. Query the base tables with `release_date = ...` for older
-ones. Every row has `ndjson_file_id` and `zst_file_id`, which are `data_file.id` values in `css_catalog_local`.
+ones. Every row has `ndjson_file_id` and `zst_file_id`, which are `data_file.id` values in the catalog: `css_catalog_local`
+on Postgres (`master_warehouse_run`, `data_file`), `HIE_WAREHOUSE_META` (`HIE_WAREHOUSE_META_DEV` for development) on
+SQL Server (`dbo.MASTER_WAREHOUSE_RUN`, `dbo.DATA_FILE`).
 
 Flattened code and type columns (e.g. `*_code`, `*_system`, `*_display`) take the first entry only:
-`coding[0]` of a CodeableConcept and `type[0]` where `type` repeats. The full resource, with every coding,
-is in `npd_raw.resource.resource` (JSONB).
+`coding[0]` of a CodeableConcept and `type[0]` where `type` repeats. The full resource, with every coding, is in
+`npd_raw.resource.resource`: JSONB on Postgres; on SQL Server a `varchar(max)` column of UTF-8 JSON, queried with
+`JSON_VALUE` / `OPENJSON`, for example:
+
+```sql
+SELECT resource_id, JSON_VALUE(resource, '$.name') AS name
+FROM npd_raw.v_resource WHERE resource_type = 'Organization';
+```
 
 ## Tests
 

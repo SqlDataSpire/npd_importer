@@ -60,3 +60,33 @@ def test_too_long_value_fails_loudly(mssql_dialect, tmp_path):
     with pytest.raises(RawLoadError, match="Organization"):
         load_fixture_raw(mssql_dialect, LocalStorage(tmp_path / "data"),
                          ndjson={"01-Organization.ndjson": (__import__("json").dumps(rec) + "\n").encode()})
+
+
+def test_two_files_of_one_resource_type_are_counted_per_type(mssql_dialect, tmp_path):
+    d = mssql_dialect
+    base = fixture_data.ORG1
+
+    def lines(prefix, n):
+        return b"".join((__import__("json").dumps({**base, "id": f"{prefix}-{i}"}) + "\n").encode() for i in range(n))
+
+    res = load_fixture_raw(d, LocalStorage(tmp_path / "data"),
+                           ndjson={"01-Organization.ndjson": lines("a", 3), "02-Organization.ndjson": lines("b", 4)})
+    assert res.rows == {"Organization": 7}
+    t = d.q(d.cfg.raw_schema, res.table)
+    assert fetch(d, f"SELECT resource_type, count(*), count(DISTINCT ndjson_file_id) FROM {t} GROUP BY resource_type"
+                 ) == [("Organization", 7, 2)]
+
+
+def test_row_count_mismatch_raises_naming_the_files(mssql_dialect, tmp_path, monkeypatch):
+    d = mssql_dialect
+    original = d._clone_indexes
+
+    def clone_then_lose_a_row(conn, schema, parent, name):
+        original(conn, schema, parent, name)
+        conn.exec_driver_sql(f"DELETE TOP (1) FROM {d.q(schema, name)} WHERE resource_type = 'Organization'")
+
+    monkeypatch.setattr(d, "_clone_indexes", clone_then_lose_a_row)
+    line = (__import__("json").dumps(fixture_data.ORG1) + "\n").encode()
+    with pytest.raises(RawLoadError, match=r"01-Organization.ndjson: read 1 Organization lines but loaded 0") as e:
+        load_fixture_raw(d, LocalStorage(tmp_path / "data"), ndjson={"01-Organization.ndjson": line})
+    assert e.value.file_id == 500

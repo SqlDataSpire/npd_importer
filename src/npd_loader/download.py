@@ -13,8 +13,8 @@ import httpx
 from npd_loader.catalog import SUCCESS, Run
 from npd_loader.manifest import Manifest, fetch_manifest, file_url
 from npd_loader.runxml import build_output_xml
-from npd_loader.stages import (Context, Outcome, StageFailed, config_xml, describe, fail_run, now,
-                               prefixed_name, run_folder)
+from npd_loader.stages import (Context, Outcome, StageFailed, close_interrupted_runs, config_xml, describe,
+                               fail_run, now, prefixed_name, run_folder)
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +42,7 @@ def run_download(ctx: Context, force: bool = False) -> Outcome:
         if not acquired:
             log.info("another download is running; nothing to do")
             return Outcome.LOCKED
+        close_interrupted_runs(ctx, cfg.catalog.run_class_download)
         manifest = fetch_manifest(ctx.http, cfg.source.manifest_url)
         release = manifest.release_date
         if not force and ctx.catalog.last_successful_run(cfg.catalog.run_class_download, release):

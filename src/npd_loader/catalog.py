@@ -15,6 +15,7 @@ SUCCESS = "Success"
 FAILED = "Failed"
 MAX_RESULT = 2000  # master_warehouse_run.result is varchar(2000)
 MAX_EXCEPTIONS = 8000  # data_file.exceptions is varchar(8000)
+INTERRUPTED = "interrupted: the process ended without recording a result"
 
 
 def truncate(text: str | None, limit: int) -> str | None:
@@ -80,6 +81,7 @@ class Catalog(Protocol):
     def get_data_files(self, release: date, file_type: str, run_id: int | None = None) -> list[DataFile]: ...
     def last_successful_run(self, run_class: str, release: date | None = None) -> Run | None: ...
     def successful_releases(self, run_class: str) -> list[date]: ...
+    def fail_open_runs(self, run_class: str) -> list[int]: ...
 
 
 def _table(md: MetaData, qualified: str, *columns: Column) -> Table:
@@ -172,3 +174,17 @@ class SqlCatalog:
 
     def successful_releases(self, run_class: str) -> list[date]:
         return releases_of(self._successful_runs(run_class))
+
+    def fail_open_runs(self, run_class: str) -> list[int]:
+        """Mark this catalog's unfinished runs of `run_class` as failed (their process was killed); returns their ids.
+        Only call while holding the stage lock, when no live run of that class can exist."""
+        r = self._runs.c
+        open_runs = and_(r.project == self._cfg.project, r.run_type == self._cfg.run_type,
+                         r.run_class == run_class, r.completion_status.is_(None))
+        with self._engine.begin() as conn:
+            ids = [row[0] for row in conn.execute(select(r.id).where(open_runs).order_by(r.id))]
+            if ids:
+                conn.execute(update(self._runs).where(open_runs, r.id.in_(ids)).values(
+                    completion_status=self._cfg.status_failed, date_completed=datetime.now().replace(microsecond=0),
+                    result=INTERRUPTED))
+        return ids

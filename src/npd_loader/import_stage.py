@@ -12,8 +12,8 @@ from npd_loader.manifest import resource_type_for
 from npd_loader.raw_load import RAW_PARENT, NdjsonInput, RawLoadError
 from npd_loader.retention import apply_retention
 from npd_loader.runxml import build_output_xml
-from npd_loader.stages import (Context, Outcome, StageFailed, completed_child, config_xml, describe, fail_run, now,
-                               original_name)
+from npd_loader.stages import (Context, Outcome, StageFailed, close_interrupted_runs, completed_child, config_xml,
+                               describe, fail_run, now, original_name)
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +82,7 @@ def run_import(ctx: Context, release: date | None = None, force: bool = False) -
             log.info("another import is running; nothing to do")
             return Outcome.LOCKED
         _drop_orphans(ctx)
+        close_interrupted_runs(ctx, cat.run_class_import)
         download_run = ctx.catalog.last_successful_run(cat.run_class_download, release)
         if download_run is None:
             raise StageFailed(f"no successful download for release {release or '(any)'}")

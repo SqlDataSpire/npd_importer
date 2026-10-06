@@ -26,7 +26,7 @@ def test_example_config_loads():
     assert cfg.npd_db.raw_schema == "npd_raw"
     assert cfg.npd_db.schema == "npd"
     assert cfg.catalog.file_set == "NPD_FHIR"
-    assert cfg.retention.keep_releases == 5
+    assert cfg.retention.keep_releases == 1
     assert cfg.download.max_attempts == 8
 
 
@@ -103,4 +103,11 @@ def test_legacy_connection_keys_are_rejected(section, key):
     data = minimal()
     data[section][key] = "x"
     with pytest.raises(ConfigError, match="database.env"):
+        parse_config(data)
+
+
+def test_raw_schema_must_differ_from_schema():
+    data = minimal()
+    data["npd_db"] = {"connection": "data", "raw_schema": "npd", "schema": "npd"}
+    with pytest.raises(ConfigError, match="raw_schema"):
         parse_config(data)

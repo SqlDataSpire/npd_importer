@@ -67,3 +67,16 @@ class CatalogContract:
         fid = catalog.add_data_file(run, file_type="ndjson", source_version_num=R2.isoformat())
         catalog.update_data_file(fid, exceptions="x" * 9000)
         assert len(catalog.get_data_files(R2, "ndjson")[0].exceptions) == 8000
+
+    def test_fail_open_runs_closes_only_open_runs_of_the_class(self, catalog):
+        open_dl = catalog.start_run("DOWNLOAD", "d", cfg(R2))
+        open_dl2 = catalog.start_run("DOWNLOAD", "d", cfg(R1))
+        open_import = catalog.start_run("IMPORT", "i", cfg(R2))
+        done = catalog.start_run("DOWNLOAD", "d", cfg(R2))
+        catalog.finish_run(done, SUCCESS)
+        failed = catalog.start_run("DOWNLOAD", "d", cfg(R2))
+        catalog.finish_run(failed, FAILED, result="boom")
+        assert catalog.fail_open_runs("DOWNLOAD") == [open_dl.id, open_dl2.id]
+        assert catalog.last_successful_run("DOWNLOAD", R2).id == done.id        # finished runs untouched
+        assert catalog.fail_open_runs("DOWNLOAD") == []                          # nothing left open
+        assert catalog.fail_open_runs("IMPORT") == [open_import.id]              # other class was untouched

@@ -29,8 +29,9 @@ LOCK_BACKOFF_SECONDS = 2.0
 STANDALONE_RE = r"__r{run}(__[a-z]+)?$"
 # A transform script with this line runs once per chunk of CHUNK_ROWS resources of that type, <<chunk>> rendered
 # to the chunk's predicate on the raw table (alias r).
-CHUNK_RE = re.compile(r"^-- chunked: ([A-Za-z]+)[ \t]*\r?$", re.MULTILINE)
+CHUNK_RE = re.compile(r"-- chunked: ([A-Za-z]+)[ \t]*(\r?\n|$)")   # first line of the script only
 CHUNK_ROWS = 200_000
+CHUNK_LOG_EVERY = 10
 T = TypeVar("T")
 
 
@@ -198,10 +199,6 @@ class MssqlDialect:
         except (OSError, ValueError) as exc:
             raw_conn.rollback()
             raise RawLoadError(f"{inp.name}: cannot read {inp.rel_path}: {exc}", inp.file_id) from exc
-        count = cur.execute(f"SELECT COUNT_BIG(*) FROM {self.q(self.cfg.raw_schema, table)} WHERE resource_type = ?",
-                            inp.resource_type).fetchone()[0]
-        if count != lines:
-            raise RawLoadError(f"{inp.name}: read {lines} lines but loaded {count} rows", inp.file_id)
         log.info("loaded %d %s resources from %s", lines, inp.resource_type, inp.rel_path)
         return lines
 
@@ -211,7 +208,10 @@ class MssqlDialect:
             table = self._create_standalone(conn, raw_schema, RAW_PARENT, release, run_id)
         raw_conn = self.engine.raw_connection()
         try:
-            rows = {inp.resource_type: self._load_file(raw_conn, table, release, inp, storage) for inp in inputs}
+            rows: dict[str, int] = {}
+            for inp in inputs:
+                rows[inp.resource_type] = rows.get(inp.resource_type, 0) + self._load_file(
+                    raw_conn, table, release, inp, storage)
         finally:
             raw_conn.close()
         try:
@@ -228,7 +228,19 @@ class MssqlDialect:
             detail = "; ".join(f"{t} {i} at lines {lines}" for t, i, lines in dups)
             file_ids = {inp.resource_type: inp.file_id for inp in inputs}
             raise RawLoadError(f"duplicate resource ids: {detail}", file_ids.get(dups[0][0]) if dups else None) from exc
+        self._check_row_counts(raw_schema, table, inputs, rows)
         return RawLoadResult(table, rows)
+
+    def _check_row_counts(self, schema: str, table: str, inputs: list[NdjsonInput], read: dict[str, int]) -> None:
+        """One scan (of the narrow resource_key index) comparing rows per resource type with the lines read."""
+        with self.engine.connect() as conn:
+            loaded = {t: n for t, n in conn.exec_driver_sql(
+                f"SELECT resource_type, COUNT_BIG(*) FROM {self.q(schema, table)} GROUP BY resource_type")}
+        for resource_type, lines in read.items():
+            if loaded.get(resource_type, 0) != lines:
+                files = [inp for inp in inputs if inp.resource_type == resource_type]
+                raise RawLoadError(f"{', '.join(i.name for i in files)}: read {lines} {resource_type} lines but "
+                                   f"loaded {loaded.get(resource_type, 0)} rows", files[0].file_id)
 
     def _chunks(self, raw: str, release: date, resource_type: str) -> list[str]:
         """<<chunk>> predicates splitting the `resource_type` rows of `raw` into resource_id ranges of chunk_rows rows
@@ -236,7 +248,8 @@ class MssqlDialect:
         with self.engine.connect() as conn:
             starts = [r[0] for r in conn.exec_driver_sql(
                 f"SELECT resource_id FROM (SELECT resource_id, ROW_NUMBER() OVER (ORDER BY resource_id) - 1 AS n "
-                f"FROM {raw} WHERE release_date = ? AND resource_type = ?) x WHERE n % ? = 0 ORDER BY resource_id",
+                f"FROM {raw} WHERE release_date = ? AND resource_type = CAST(? AS varchar(40))) x "
+                f"WHERE n % ? = 0 ORDER BY resource_id",
                 (release, resource_type, self.chunk_rows))]
         day = f"r.release_date = '{release.isoformat()}'"
         if not starts:
@@ -270,11 +283,15 @@ class MssqlDialect:
                   "schema": self.q(schema), **{f"t:{p}": self.q(schema, n) for p, n in tables.items()}, **stages}
         for script, text in sql_scripts("mssql", "transform"):
             log.info("running transform %s", script)
-            directive = CHUNK_RE.search(text)
+            directive = CHUNK_RE.match(text)
+            if directive and "<<chunk>>" not in text:
+                raise ValueError(f"{script} has a '-- chunked:' directive but no <<chunk>> token")
             chunks = self._chunks(raw, release, directive.group(1)) if directive else [None]
             for number, chunk in enumerate(chunks, 1):
                 if chunk is not None:
                     log.debug("transform %s chunk %d of %d: %s", script, number, len(chunks), chunk)
+                    if number % CHUNK_LOG_EVERY == 0 or number == len(chunks):
+                        log.info("%s: chunk %d/%d", script, number, len(chunks))
                 batches = split_batches(render(text, tokens if chunk is None else {**tokens, "chunk": chunk}))
                 for batch in batches:
                     with self.engine.begin() as conn:      # each statement commits as soon as it lands
@@ -357,9 +374,12 @@ class MssqlDialect:
 
         self._locked_transaction(work, f"publish release {release}")
         log.info("published release %s (%d tables)", release, len(targets))
-        with self._autocommit() as conn:
+        with self._autocommit() as conn:        # best effort: the release is already published
             for s, parent, _ in targets:
-                conn.exec_driver_sql(f"UPDATE STATISTICS {self.q(s, parent)}")
+                try:
+                    conn.exec_driver_sql(f"UPDATE STATISTICS {self.q(s, parent)}")
+                except Exception as exc:
+                    log.warning("UPDATE STATISTICS %s.%s failed (release %s is published): %s", s, parent, release, exc)
 
     def drop_release(self, release: date) -> list[str]:
         raw_schema, schema = self.cfg.raw_schema, self.cfg.schema

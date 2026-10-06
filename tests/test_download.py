@@ -126,3 +126,11 @@ def test_lock_held_elsewhere_exits_quietly(tmp_path, cms, release):
     ctx.lock = busy
     assert run_download(ctx) is Outcome.LOCKED
     assert ctx.catalog.runs == {}
+
+
+def test_open_download_run_of_a_killed_process_is_closed(tmp_path, cms, release):
+    ctx = make_ctx(tmp_path, cms)
+    dead = ctx.catalog.start_run("DOWNLOAD", "killed", "<WAREHOUSE_RUN_CONFIG/>")
+    assert run_download(ctx) is Outcome.SUCCESS
+    assert ctx.catalog.runs[dead.id]["status"] == FAILED
+    assert ctx.catalog.runs[dead.id]["result"].startswith("interrupted")

@@ -32,3 +32,12 @@ def test_build_connection_types_and_no_stdout(capsys):
     assert capsys.readouterr().out == ""
     with pytest.raises(ConfigError, match="type"):
         build_connection("m", {"type": "mongo", "server": "x", "database": "y"})
+
+
+def test_mssql_requires_trusted_unless_sql_auth_is_explicit():
+    base = {"type": "mssql", "server": "cssnpi", "database": "npd_dev"}
+    with pytest.raises(ConfigError, match='"trusted": "yes"'):
+        build_connection("data", base)
+    with pytest.raises(ConfigError, match="Windows auth only"):
+        build_connection("data", {**base, "UN": "u"})
+    assert type(build_connection("data", {**base, "UN": "u", "PW": "p"})).__name__ == "SqlConnectionObject"

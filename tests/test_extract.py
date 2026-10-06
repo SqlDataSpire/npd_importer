@@ -116,3 +116,12 @@ def test_force_reextracts_with_same_ids(downloaded):
     ids = [r.id for r in ndjson_rows(ctx)]
     assert run_extract(ctx, force=True) is Outcome.SUCCESS
     assert [r.id for r in ndjson_rows(ctx)] == ids
+
+
+def test_open_extract_run_of_a_killed_process_is_closed(downloaded, caplog):
+    ctx, _ = downloaded
+    dead = ctx.catalog.start_run("EXTRACT", "killed", "<WAREHOUSE_RUN_CONFIG/>")
+    assert run_extract(ctx) is Outcome.SUCCESS
+    assert ctx.catalog.runs[dead.id]["status"] == FAILED
+    assert ctx.catalog.runs[dead.id]["result"].startswith("interrupted")
+    assert str(dead.id) in caplog.text
