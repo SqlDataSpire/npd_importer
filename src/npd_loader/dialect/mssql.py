@@ -6,14 +6,14 @@ import re
 import time
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
-from typing import Callable, Iterator
+from typing import Callable, Iterator, TypeVar
 
 import pyodbc
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError
 
 from npd_loader.config import NpdDbConfig
-from npd_loader.dialect import TransformResult
+from npd_loader.dialect import LockUnavailable, PublishConflict, TransformResult
 from npd_loader.raw_load import RAW_PARENT, NdjsonInput, RawLoadError, RawLoadResult, iter_lines, validate_line
 from npd_loader.sqltext import render, split_batches, sql_scripts, standalone_name
 from npd_loader.storage import Storage
@@ -24,6 +24,10 @@ BATCH_ROWS = 5000
 RAW_COLUMNS = ("release_date", "resource_type", "resource_id", "last_updated", "ndjson_file_id", "zst_file_id",
                "line_number", "resource")
 ERROR_NUMBER_RE = re.compile(r"\((\d+)\)")
+LOCK_ATTEMPTS = 3
+LOCK_BACKOFF_SECONDS = 2.0
+STANDALONE_RE = r"__r{run}(__[a-z]+)?$"
+T = TypeVar("T")
 
 
 def error_number(exc: BaseException) -> int | None:
@@ -239,3 +243,137 @@ class MssqlDialect:
                 self._clone_indexes(conn, schema, parent, name)
                 counts[parent] = conn.exec_driver_sql(f"SELECT COUNT_BIG(*) FROM {self.q(schema, name)}").scalar()
         return TransformResult(tables, counts)
+
+    def _locked_transaction(self, work: Callable[[Connection], "T"], what: str) -> "T":
+        """Run `work` in one transaction with SET LOCK_TIMEOUT; retry the whole transaction LOCK_ATTEMPTS times on
+        error 1222 (lock request timeout), then raise LockUnavailable."""
+        timeout_ms = max(1, round(self.cfg.lock_timeout_seconds * 1000))
+        for attempt in range(1, LOCK_ATTEMPTS + 1):
+            try:
+                with self.engine.connect() as conn:
+                    try:
+                        with conn.begin():
+                            conn.exec_driver_sql(f"SET XACT_ABORT ON; SET LOCK_TIMEOUT {timeout_ms}")
+                            return work(conn)
+                    finally:
+                        conn.exec_driver_sql("SET LOCK_TIMEOUT -1")
+                        conn.rollback()
+            except DBAPIError as exc:
+                if error_number(exc) != 1222:
+                    raise
+                if attempt == LOCK_ATTEMPTS:
+                    raise LockUnavailable(f"{what}: lock request timed out after {self.cfg.lock_timeout_seconds}s "
+                                          f"({LOCK_ATTEMPTS} attempts)") from exc
+                log.warning("%s: lock request timed out (attempt %d of %d); retrying", what, attempt, LOCK_ATTEMPTS)
+                self._sleep(LOCK_BACKOFF_SECONDS * attempt)
+        raise AssertionError("unreachable")
+
+    def _partition_rows(self, conn: Connection, schema: str, table: str, release: date) -> int:
+        return conn.exec_driver_sql(
+            f"SELECT COALESCE(SUM(p.rows), 0) FROM sys.partitions p WHERE p.object_id = OBJECT_ID(?) "
+            f"AND p.index_id IN (0, 1) AND p.partition_number = $PARTITION.{self.q(self.pf(schema))}(?)",
+            (f"{schema}.{table}", release)).scalar()
+
+    def _partition_number(self, conn: Connection, schema: str, release: date) -> int:
+        return conn.exec_driver_sql(f"SELECT $PARTITION.{self.q(self.pf(schema))}(?)", (release,)).scalar()
+
+    def _switch_out_and_drop(self, conn: Connection, schema: str, parent: str, release: date, run_id: int) -> None:
+        name = standalone_name(f"{parent}__out", release, run_id, MAX_IDENTIFIER)
+        target = self.q(schema, name)
+        conn.exec_driver_sql(f"SELECT TOP 0 * INTO {target} FROM {self.q(schema, parent)}")
+        conn.exec_driver_sql(f"ALTER TABLE {target} REBUILD WITH (DATA_COMPRESSION = PAGE)")
+        self._clone_indexes(conn, schema, parent, name)
+        number = self._partition_number(conn, schema, release)
+        conn.exec_driver_sql(f"ALTER TABLE {self.q(schema, parent)} SWITCH PARTITION {number} TO {target}")
+        conn.exec_driver_sql(f"DROP TABLE {target}")
+
+    def publish(self, raw_table: str, tables: dict[str, str], release: date, run_id: int, force: bool) -> None:
+        raw_schema, schema = self.cfg.raw_schema, self.cfg.schema
+        targets = [(raw_schema, RAW_PARENT, raw_table)] + [(schema, p, n) for p, n in sorted(tables.items())]
+        day = f"'{release.isoformat()}'"
+
+        def work(conn: Connection) -> None:
+            for s in (raw_schema, schema):
+                if release not in self._boundaries(conn, s):
+                    conn.exec_driver_sql(f"ALTER PARTITION SCHEME {self.q(self.ps(s))} NEXT USED [PRIMARY]")
+                    conn.exec_driver_sql(f"ALTER PARTITION FUNCTION {self.q(self.pf(s))}() SPLIT RANGE ({day})")
+            for s, parent, new in targets:
+                if self._partition_rows(conn, s, parent, release):
+                    if not force:
+                        raise PublishConflict(f"release {release} is already published in {s}.{parent}; "
+                                              f"rerun with --force to replace it")
+                    self._switch_out_and_drop(conn, s, parent, release, run_id)
+                number = self._partition_number(conn, s, release)
+                conn.exec_driver_sql(f"ALTER TABLE {self.q(s, new)} SWITCH TO {self.q(s, parent)} PARTITION {number}")
+                conn.exec_driver_sql(f"DROP TABLE {self.q(s, new)}")
+            conn.exec_driver_sql(
+                f"MERGE {self.q(schema, 'release')} AS t USING (SELECT CAST(? AS date) AS release_date, ? AS run_id) AS s "
+                f"ON t.release_date = s.release_date "
+                f"WHEN MATCHED THEN UPDATE SET import_run_id = s.run_id, published_at = SYSUTCDATETIME() "
+                f"WHEN NOT MATCHED THEN INSERT (release_date, import_run_id) VALUES (s.release_date, s.run_id);",
+                (release, run_id))
+
+        self._locked_transaction(work, f"publish release {release}")
+        log.info("published release %s (%d tables)", release, len(targets))
+        with self._autocommit() as conn:
+            for s, parent, _ in targets:
+                conn.exec_driver_sql(f"UPDATE STATISTICS {self.q(s, parent)}")
+
+    def drop_release(self, release: date) -> list[str]:
+        raw_schema, schema = self.cfg.raw_schema, self.cfg.schema
+
+        def work(conn: Connection) -> list[str]:
+            dropped: list[str] = []
+            for s in (raw_schema, schema):
+                if release not in self._boundaries(conn, s):
+                    continue
+                for parent in self.parent_tables(conn, s):
+                    if self._partition_rows(conn, s, parent, release):
+                        self._switch_out_and_drop(conn, s, parent, release, 0)
+                        dropped.append(f"{s}.{parent}")
+                conn.exec_driver_sql(f"ALTER PARTITION FUNCTION {self.q(self.pf(s))}() "
+                                     f"MERGE RANGE ('{release.isoformat()}')")
+            conn.exec_driver_sql(f"DELETE FROM {self.q(schema, 'release')} WHERE release_date = ?", (release,))
+            return dropped
+
+        return self._locked_transaction(work, f"drop release {release}")
+
+    @contextmanager
+    def run_lock(self, stage: str) -> Iterator[bool]:
+        """Session-owned application lock on its own connection, held for the whole stage."""
+        conn = self._autocommit()
+        resource = f"npd_loader:{self.cfg.schema}:{stage}"
+        try:
+            rc = conn.exec_driver_sql(
+                "SET NOCOUNT ON; DECLARE @rc int; EXEC @rc = sp_getapplock @Resource = ?, @LockMode = 'Exclusive', "
+                "@LockOwner = 'Session', @LockTimeout = 0; SELECT @rc", (resource,)).scalar()
+        except Exception:
+            conn.close()
+            raise
+        acquired = rc is not None and rc >= 0
+        if not acquired:
+            conn.close()
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            try:
+                conn.exec_driver_sql("EXEC sp_releaseapplock @Resource = ?, @LockOwner = 'Session'", (resource,))
+            finally:
+                conn.close()
+
+    def drop_standalone_tables(self, run_id: int | None = None) -> list[str]:
+        """Drop unpublished tables of import `run_id` (any run when None). Only safe with the import lock held."""
+        pattern = re.compile(STANDALONE_RE.format(run=run_id if run_id is not None else r"\d+"))
+        dropped: list[str] = []
+        with self._autocommit() as conn:
+            for schema in (self.cfg.raw_schema, self.cfg.schema):
+                published = set(self.parent_tables(conn, schema))
+                names = [r[0] for r in conn.exec_driver_sql(
+                    "SELECT name FROM sys.tables WHERE schema_id = SCHEMA_ID(?) ORDER BY name", (schema,))]
+                for name in names:
+                    if name not in published and pattern.search(name):
+                        conn.exec_driver_sql(f"DROP TABLE {self.q(schema, name)}")
+                        dropped.append(f"{schema}.{name}")
+        return dropped
