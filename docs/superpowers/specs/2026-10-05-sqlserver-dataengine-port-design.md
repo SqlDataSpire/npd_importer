@@ -124,6 +124,23 @@ For each `.ndjson`, the shared loop reads and validates lines and inserts batche
 line-count check stays. After all files, the unique index `(release_date, resource_type, resource_id)` is built; on
 error 1505 the loader queries the duplicates and raises `RawLoadError` naming the file, as today.
 
+**Each batch commits as soon as it lands.** No transaction spans a file, which bounds transaction-log growth and lock
+duration. This is safe because the batches go into an unpublished standalone table that nothing reads: if a file
+fails partway, its committed rows stay in that table and the existing failure path drops it
+(`drop_standalone_tables` for the run, or orphan cleanup if the process was killed), so partial data is never
+published. The end-of-file line-count check still catches missing rows. A rerun restarts the import; resuming
+mid-file is out of scope.
+
+### Transaction boundaries
+
+| Step | Transaction |
+|---|---|
+| Raw load | one per batch of 5,000 rows |
+| Each transform script | one per script (each `INSERT … SELECT` is atomic regardless); minimal logging via `TABLOCK` and `SIMPLE` recovery keeps the log small. If the first full run shows log pressure, the fallback is chunking the largest scripts by `resource_id` range. |
+| Index builds, row counts | one per step, as today |
+| Publish, drop release | one each; metadata-only (`SPLIT` / `SWITCH` / `MERGE`), so seconds long. This is what keeps publication atomic. |
+| Catalog writes | one per call (autocommit), independent of the data, as today |
+
 **First plan task: throughput spike.** Bulk loading `varchar(max)` through pyodbc `fast_executemany` has unknown
 throughput; Postgres `COPY` already took 3 h. Load one real file (Organization, 2.06M rows) and measure rows/s. If it
 is too slow, the dialect method uses `bcp.exe -T` from the loader host instead (still Windows auth). The rest of the
@@ -187,7 +204,8 @@ boundaries. The `v_*` views are recreated at the end with `CREATE OR ALTER VIEW`
 Connections from `PgConnectionObject.engine` (SQLAlchemy + psycopg2). SQL files unchanged. Glue ported
 mechanically: identifiers quoted by the engine's `identifier_preparer`; transactions via `engine.begin()`; lock
 timeout detected by pgcode `55P03` on the wrapped DBAPI error; `COPY … FROM STDIN (FORMAT csv)` through
-`raw_connection().cursor().copy_expert` with a file-like wrapper that yields CSV rows as the `.ndjson` is read.
+`raw_connection().cursor().copy_expert` with a file-like wrapper that yields CSV rows as the `.ndjson` is read,
+one `COPY` and commit per batch of rows to match the SQL Server batch-commit rule.
 `PgConnectionObject` only supports user/password auth and takes the port as `server = "host:port"`. Verification is
 deferred: the Postgres database tests run only when `NPD_TEST_PG_DB` is set.
 
