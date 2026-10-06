@@ -23,17 +23,13 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
-class CredentialsConfig:
-    backend: str
+class DatabasesConfig:
+    env_file: str
 
 
 @dataclass(frozen=True)
 class NpdDbConfig:
-    host: str
-    port: int
-    dbname: str
-    user: str | None
-    password: str | None
+    connection: str
     raw_schema: str
     schema: str
     lock_timeout_seconds: float = 30.0   # how long publish/retention DDL waits for a parent table lock
@@ -41,12 +37,7 @@ class NpdDbConfig:
 
 @dataclass(frozen=True)
 class CatalogConfig:
-    backend: str
-    host: str
-    port: int
-    dbname: str
-    user: str | None
-    password: str | None
+    connection: str
     project: str
     run_type: str
     file_set: str
@@ -81,7 +72,7 @@ class RetentionConfig:
 class Config:
     source: SourceConfig
     storage: StorageConfig
-    credentials: CredentialsConfig
+    databases: DatabasesConfig
     npd_db: NpdDbConfig
     catalog: CatalogConfig
     download: DownloadConfig
@@ -89,8 +80,7 @@ class Config:
 
 
 STORAGE_BACKENDS = {"local"}
-CREDENTIAL_BACKENDS = {"config"}
-CATALOG_BACKENDS = {"css_catalog_pg"}
+LEGACY_KEYS = {"host", "port", "dbname", "user", "password", "backend"}
 
 
 def load_config(path: str | Path) -> Config:
@@ -142,39 +132,39 @@ def _optional(section: dict[str, Any], name: str, cls: type) -> dict[str, Any]:
     return out
 
 
+def _no_legacy(section: dict[str, Any], name: str) -> None:
+    found = sorted(LEGACY_KEYS & set(section))
+    if found:
+        raise ConfigError(f"[{name}] {', '.join(found)}: connection settings moved to the database.env file "
+                          f"named by [databases] env_file; set [{name}] connection instead")
+
+
 def parse_config(data: dict[str, Any]) -> Config:
     src = _section(data, "source")
     sto = _section(data, "storage")
-    cred = _section(data, "credentials")
+    dbs = _section(data, "databases")
     npd = _section(data, "npd_db")
     cat = _section(data, "catalog")
     dl = _section(data, "download", required=False)
     ret = _section(data, "retention", required=False)
+    _no_legacy(npd, "npd_db")
+    _no_legacy(cat, "catalog")
 
-    catalog_known = {"backend", "host", "port", "dbname", "user", "password", "project", "run_type", "file_set"}
+    catalog_known = {"connection", "project", "run_type", "file_set"}
     catalog_extra = _optional({k: v for k, v in cat.items() if k not in catalog_known}, "catalog", CatalogConfig)
 
     config = Config(
         source=SourceConfig(manifest_url=_req(src, "source", "manifest_url")),
         storage=StorageConfig(backend=_backend(sto, "storage", STORAGE_BACKENDS), root=_req(sto, "storage", "root")),
-        credentials=CredentialsConfig(backend=_backend(cred, "credentials", CREDENTIAL_BACKENDS)),
+        databases=DatabasesConfig(env_file=_req(dbs, "databases", "env_file")),
         npd_db=NpdDbConfig(
-            host=_req(npd, "npd_db", "host"),
-            port=_req(npd, "npd_db", "port", int),
-            dbname=_req(npd, "npd_db", "dbname"),
-            user=npd.get("user"),
-            password=npd.get("password"),
+            connection=_req(npd, "npd_db", "connection"),
             raw_schema=npd.get("raw_schema", "npd_raw"),
             schema=npd.get("schema", "npd"),
             **_optional({k: v for k, v in npd.items() if k == "lock_timeout_seconds"}, "npd_db", NpdDbConfig),
         ),
         catalog=CatalogConfig(
-            backend=_backend(cat, "catalog", CATALOG_BACKENDS),
-            host=_req(cat, "catalog", "host"),
-            port=_req(cat, "catalog", "port", int),
-            dbname=_req(cat, "catalog", "dbname"),
-            user=cat.get("user"),
-            password=cat.get("password"),
+            connection=_req(cat, "catalog", "connection"),
             project=_req(cat, "catalog", "project"),
             run_type=_req(cat, "catalog", "run_type"),
             file_set=_req(cat, "catalog", "file_set"),

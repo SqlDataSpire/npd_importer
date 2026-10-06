@@ -1,43 +1,41 @@
 """Builders for configs and stage contexts used across tests."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
-from psycopg.conninfo import conninfo_to_dict
-
 from fakes import FakeCatalog
 from npd_loader.config import parse_config
 from npd_loader.stages import Context, no_lock
 from npd_loader.storage import LocalStorage
 
 
-def _db(info: str | None, extra: dict) -> dict:
-    if info is None:
-        base = {"host": "localhost", "port": 5432, "dbname": "unused", "user": "u", "password": "p"}
-    else:
-        d = conninfo_to_dict(info)
-        base = {"host": d["host"], "port": int(d["port"]), "dbname": d["dbname"], "user": d["user"],
-                "password": d["password"]}
-    return {**base, **extra}
+def write_env_file(path, docs: dict) -> str:
+    path.write_text(f"databases = '{json.dumps(docs)}'\n", encoding="utf-8")
+    return str(path)
 
 
-def config_data(storage_root: Path, manifest_url: str, npd_conninfo: str | None = None,
-                catalog_conninfo: str | None = None, keep_releases: int = 5) -> dict:
+def config_data(storage_root: Path, manifest_url: str, env_file: str | None = None,
+                schemas: tuple[str, str] = ("npd_raw", "npd"), catalog_tables: tuple[str, str] | None = None,
+                keep_releases: int = 5) -> dict:
+    catalog = {"connection": "catalog", "project": "NPD", "run_type": "National Provider Directory",
+               "file_set": "NPD_FHIR"}
+    if catalog_tables:
+        catalog["run_table"], catalog["file_table"] = catalog_tables
     return {
         "source": {"manifest_url": manifest_url},
         "storage": {"backend": "local", "root": str(storage_root)},
-        "credentials": {"backend": "config"},
-        "npd_db": _db(npd_conninfo, {"raw_schema": "npd_raw", "schema": "npd"}),
-        "catalog": _db(catalog_conninfo, {"backend": "css_catalog_pg", "project": "NPD",
-                                          "run_type": "National Provider Directory", "file_set": "NPD_FHIR"}),
+        "databases": {"env_file": env_file or "unused.env"},
+        "npd_db": {"connection": "data", "raw_schema": schemas[0], "schema": schemas[1]},
+        "catalog": catalog,
         "download": {"max_attempts": 3, "backoff_seconds": 0, "timeout_seconds": 10},
         "retention": {"keep_releases": keep_releases},
     }
 
 
 def make_ctx(tmp_path: Path, cms, catalog=None, npd_conninfo: str | None = None, **config_kw) -> Context:
-    config = parse_config(config_data(tmp_path / "data", cms.manifest_url, npd_conninfo=npd_conninfo, **config_kw))
+    config = parse_config(config_data(tmp_path / "data", cms.manifest_url, **config_kw))
     return Context(config=config, catalog=catalog if catalog is not None else FakeCatalog(),
                    storage=LocalStorage(tmp_path / "data"), http=httpx.Client(), lock=no_lock,
                    npd_conninfo=npd_conninfo, sleep=lambda seconds: None)

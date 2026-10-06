@@ -3,27 +3,26 @@ from pathlib import Path
 import pytest
 
 from npd_loader.config import ConfigError, load_config, parse_config
-from npd_loader.credentials import DbCredentials, conninfo, get_db_credentials
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "config.example.toml"
 
 
 def minimal() -> dict:
-    db = {"host": "h", "port": 5432, "dbname": "d", "user": "u", "password": "p"}
     return {
         "source": {"manifest_url": "https://example.test/downloads/manifest.json"},
         "storage": {"backend": "local", "root": "/data/npd"},
-        "credentials": {"backend": "config"},
-        "npd_db": dict(db),
-        "catalog": {**db, "backend": "css_catalog_pg", "project": "NPD",
-                    "run_type": "National Provider Directory", "file_set": "NPD_FHIR"},
+        "databases": {"env_file": "database.env"},
+        "npd_db": {"connection": "data"},
+        "catalog": {"connection": "catalog", "project": "NPD", "run_type": "National Provider Directory",
+                    "file_set": "NPD_FHIR"},
     }
 
 
 def test_example_config_loads():
     cfg = load_config(EXAMPLE)
     assert cfg.source.manifest_url == "https://directory.cms.gov/downloads/manifest.json"
-    assert cfg.storage.root == "/data/npd"
+    assert cfg.storage.root == "D:\\npd"
+    assert cfg.catalog.run_table == "dbo.MASTER_WAREHOUSE_RUN"
     assert cfg.npd_db.raw_schema == "npd_raw"
     assert cfg.npd_db.schema == "npd"
     assert cfg.catalog.file_set == "NPD_FHIR"
@@ -77,8 +76,7 @@ def test_missing_key_is_named():
         parse_config(data)
 
 
-@pytest.mark.parametrize("section,value", [("storage", "s3"), ("credentials", "1password"),
-                                           ("catalog", "azure_api")])
+@pytest.mark.parametrize("section,value", [("storage", "s3")])
 def test_unbuilt_backends_are_rejected(section, value):
     data = minimal()
     data[section]["backend"] = value
@@ -93,16 +91,16 @@ def test_keep_releases_must_be_positive():
         parse_config(data)
 
 
-def test_credentials_from_config():
+def test_connections_are_named():
     cfg = parse_config(minimal())
-    assert get_db_credentials(cfg, "npd_db") == DbCredentials("u", "p")
-    info = conninfo(cfg, "catalog")
-    assert "host=h" in info and "dbname=d" in info and "user=u" in info
+    assert cfg.databases.env_file == "database.env"
+    assert (cfg.npd_db.connection, cfg.catalog.connection) == ("data", "catalog")
 
 
-def test_credentials_missing_password():
+@pytest.mark.parametrize("section,key", [("npd_db", "host"), ("npd_db", "password"), ("catalog", "user"),
+                                         ("catalog", "backend")])
+def test_legacy_connection_keys_are_rejected(section, key):
     data = minimal()
-    del data["npd_db"]["password"]
-    cfg = parse_config(data)
-    with pytest.raises(ConfigError, match="password"):
-        get_db_credentials(cfg, "npd_db")
+    data[section][key] = "x"
+    with pytest.raises(ConfigError, match="database.env"):
+        parse_config(data)

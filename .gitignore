@@ -14,6 +14,7 @@ htmlcov/
 config.toml
 *.local.toml
 .env
+database.env
 
 # Data files
 *.zst

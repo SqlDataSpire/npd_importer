@@ -1,32 +1,26 @@
-# Copy to /etc/npd-loader/config.toml (mode 600). Never commit the real file.
+# Copy to C:\npd-loader\config.toml. Connections live in the DataEngine env file named below (Windows auth, no
+# passwords). Use database.dev.env for development and database.prd.env for production.
 
 [source]
 manifest_url = "https://directory.cms.gov/downloads/manifest.json"
 
 [storage]
 backend = "local"
-root = "/data/npd"            # npd_data_folder
+root = 'D:\npd'
 
-[credentials]
-backend = "config"
+[databases]
+env_file = 'C:\npd-loader\database.prd.env'
 
 [npd_db]
-host = "192.10.0.6"
-port = 5432
-dbname = "npd"
-user = "..."
-password = "..."
+connection = "data"           # its type (mssql|postgres) selects the flavor
 raw_schema = "npd_raw"
 schema = "npd"
 lock_timeout_seconds = 30     # publish/retention give up waiting for a table lock after this (3 attempts)
 
 [catalog]
-backend = "css_catalog_pg"
-host = "192.10.0.6"
-port = 5432
-dbname = "css_catalog_local"
-user = "..."
-password = "..."
+connection = "catalog"
+run_table = "dbo.MASTER_WAREHOUSE_RUN"
+file_table = "dbo.DATA_FILE"
 project = "NPD"
 run_type = "National Provider Directory"
 file_set = "NPD_FHIR"

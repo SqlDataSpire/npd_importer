@@ -11,7 +11,7 @@ import httpx
 
 from npd_loader.catalog import Catalog, CssCatalogPg
 from npd_loader.config import CatalogConfig, Config, ConfigError, load_config
-from npd_loader.credentials import conninfo
+from npd_loader.connections import open_connection, pg_conninfo
 from npd_loader.db import advisory_lock, published_releases
 from npd_loader.download import run_download
 from npd_loader.extract import run_extract
@@ -46,10 +46,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_context(config: Config) -> Context:
-    npd = conninfo(config, "npd_db")
+    npd = pg_conninfo(open_connection(config, "npd_db"))
     return Context(
         config=config,
-        catalog=CssCatalogPg(conninfo(config, "catalog"), config.catalog),
+        catalog=CssCatalogPg(pg_conninfo(open_connection(config, "catalog")), config.catalog),
         storage=LocalStorage(config.storage.root),
         http=httpx.Client(timeout=config.download.timeout_seconds, headers={"User-Agent": "npd-loader/0.1"}),
         lock=lambda stage: advisory_lock(npd, stage),
@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             return _profile(args)
         config = load_config(args.config)
         if args.command == "init-db":
-            init_db(conninfo(config, "npd_db"), config.npd_db.raw_schema, config.npd_db.schema)
+            init_db(pg_conninfo(open_connection(config, "npd_db")), config.npd_db.raw_schema, config.npd_db.schema)
             log.info("npd database objects are up to date")
             return 0
         ctx = build_context(config)
