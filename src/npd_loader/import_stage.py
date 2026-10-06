@@ -9,16 +9,14 @@ import psycopg
 from psycopg import sql
 
 from npd_loader.catalog import SUCCESS, Run
-from npd_loader.db import list_release_partitions
+from npd_loader.dialect import PublishConflict
 from npd_loader.extract import run_extract
 from npd_loader.manifest import resource_type_for
-from npd_loader.publish import PublishConflict, publish_release
-from npd_loader.raw_load import RAW_PARENT, NdjsonInput, RawLoadError, load_raw
+from npd_loader.raw_load import RAW_PARENT, NdjsonInput, RawLoadError
 from npd_loader.retention import apply_retention
 from npd_loader.runxml import build_output_xml
 from npd_loader.stages import (Context, Outcome, StageFailed, completed_child, config_xml, describe, fail_run, now,
                                original_name)
-from npd_loader.transform import run_transforms
 
 log = logging.getLogger(__name__)
 
@@ -65,9 +63,8 @@ def drop_standalone_tables(conninfo: str, schemas: list[str], run_id: int | None
 def _drop_orphans(ctx: Context) -> None:
     """With the import lock held no import is running, so any standalone table left by an import that was
     killed (SIGTERM/SIGKILL/OOM) before its cleanup ran is an orphan."""
-    db = ctx.config.npd_db
     try:
-        dropped = drop_standalone_tables(ctx.npd_conninfo, [db.raw_schema, db.schema])
+        dropped = ctx.dialect.drop_standalone_tables()
     except Exception:
         log.exception("could not drop orphaned standalone tables")
         return
@@ -78,14 +75,14 @@ def _drop_orphans(ctx: Context) -> None:
 
 def _import(ctx: Context, run: Run, release: date, inputs: list[NdjsonInput], force: bool) -> list[dict]:
     db = ctx.config.npd_db
-    with psycopg.connect(ctx.npd_conninfo) as conn:
-        if not force and list_release_partitions(conn, db.raw_schema, RAW_PARENT).get(release):
-            raise PublishConflict(f"release {release} is already published in {db.raw_schema}.{RAW_PARENT} "
-                                  f"but the catalog has no successful import; rerun with --force to replace it")
-        raw = load_raw(conn, ctx.storage, db.raw_schema, release, run.id, inputs)
-        transformed = run_transforms(conn, db.raw_schema, raw.table, db.schema, release, run.id)
-        publish_release(conn, db.raw_schema, raw.table, db.schema, transformed.tables, release, run.id, force,
-                        db.lock_timeout_seconds, ctx.sleep)
+    d = ctx.dialect
+    if not force and d.is_published(release):
+        raise PublishConflict(f"release {release} is already published in {db.raw_schema}.{RAW_PARENT} "
+                              f"but the catalog has no successful import; rerun with --force to replace it")
+    with d.session():
+        raw = d.load_raw(ctx.storage, release, run.id, inputs)
+        transformed = d.run_transforms(raw.table, release, run.id)
+        d.publish(raw.table, transformed.tables, release, run.id, force)
     return ([{"table": f"{db.raw_schema}.{RAW_PARENT}", "resource_type": t, "rows": n} for t, n in raw.rows.items()]
             + [{"table": f"{db.schema}.{t}", "rows": n} for t, n in transformed.counts.items()])
 
@@ -131,7 +128,7 @@ def run_import(ctx: Context, release: date | None = None, force: bool = False) -
             if isinstance(exc, RawLoadError) and exc.file_id is not None:
                 ctx.catalog.update_data_file(exc.file_id, exceptions=str(exc))
             try:
-                drop_standalone_tables(ctx.npd_conninfo, [cfg.npd_db.raw_schema, cfg.npd_db.schema], run.id)
+                ctx.dialect.drop_standalone_tables(run.id)
             except Exception:
                 log.exception("could not drop standalone tables of run %s", run.id)
             fail_run(ctx, run, exc)

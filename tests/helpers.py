@@ -34,11 +34,18 @@ def config_data(storage_root: Path, manifest_url: str, env_file: str | None = No
     }
 
 
-def make_ctx(tmp_path: Path, cms, catalog=None, npd_conninfo: str | None = None, **config_kw) -> Context:
+def make_ctx(tmp_path: Path, cms, catalog=None, dialect=None, **config_kw) -> Context:
     config = parse_config(config_data(tmp_path / "data", cms.manifest_url, **config_kw))
     return Context(config=config, catalog=catalog if catalog is not None else FakeCatalog(),
                    storage=LocalStorage(tmp_path / "data"), http=httpx.Client(), lock=no_lock,
-                   npd_conninfo=npd_conninfo, sleep=lambda seconds: None)
+                   dialect=dialect, sleep=lambda seconds: None)
+
+
+def pg_dialect(conninfo: str):
+    from npd_loader.config import NpdDbConfig
+    from npd_loader.dialect.postgres import PostgresDialect
+    return PostgresDialect(conninfo, NpdDbConfig(connection="data", raw_schema="npd_raw", schema="npd"),
+                           sleep=lambda s: None)
 
 
 def to_toml(data: dict) -> str:

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import date
 from importlib import resources
 
@@ -10,14 +9,9 @@ import psycopg
 from psycopg import sql
 
 from npd_loader.db import clone_parent_indexes, list_parent_tables, render_sql, standalone_name
+from npd_loader.dialect import TransformResult
 
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class TransformResult:
-    tables: dict[str, str]
-    counts: dict[str, int]
 
 
 def _scripts() -> list[tuple[str, str]]:

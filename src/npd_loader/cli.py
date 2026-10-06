@@ -11,13 +11,12 @@ import httpx
 
 from npd_loader.catalog import Catalog, SqlCatalog
 from npd_loader.config import CatalogConfig, Config, ConfigError, load_config
-from npd_loader.connections import open_connection, pg_conninfo
-from npd_loader.db import advisory_lock, published_releases
+from npd_loader.connections import open_connection
+from npd_loader.dialect import dialect_for
 from npd_loader.download import run_download
 from npd_loader.extract import run_extract
 from npd_loader.import_stage import run_import
 from npd_loader.profile import format_report, load_mapped_paths, profile_file, unmapped
-from npd_loader.schema import init_db
 from npd_loader.stages import Context, StageFailed
 from npd_loader.storage import LocalStorage
 
@@ -26,7 +25,7 @@ DEFAULT_CONFIG = "/etc/npd-loader/config.toml"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="npd-loader", description="Load the CMS NPD FHIR release into Postgres")
+    parser = argparse.ArgumentParser(prog="npd-loader", description="Load the CMS NPD FHIR release into SQL Server or Postgres")
     parser.add_argument("--config", default=os.environ.get("NPD_LOADER_CONFIG", DEFAULT_CONFIG))
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -46,14 +45,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_context(config: Config) -> Context:
-    npd = pg_conninfo(open_connection(config, "npd_db"))
+    dialect = dialect_for(open_connection(config, "npd_db"), config.npd_db)
     return Context(
         config=config,
         catalog=SqlCatalog(open_connection(config, "catalog").engine, config.catalog),
         storage=LocalStorage(config.storage.root),
         http=httpx.Client(timeout=config.download.timeout_seconds, headers={"User-Agent": "npd-loader/0.1"}),
-        lock=lambda stage: advisory_lock(npd, stage),
-        npd_conninfo=npd,
+        lock=dialect.run_lock,
+        dialect=dialect,
     )
 
 
@@ -108,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
             return _profile(args)
         config = load_config(args.config)
         if args.command == "init-db":
-            init_db(pg_conninfo(open_connection(config, "npd_db")), config.npd_db.raw_schema, config.npd_db.schema)
+            dialect_for(open_connection(config, "npd_db"), config.npd_db).init_db()
             log.info("npd database objects are up to date")
             return 0
         ctx = build_context(config)
@@ -122,8 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "run":
                 return _run(ctx)
             else:  # status
-                print(format_status(ctx.catalog, config.catalog,
-                                    published_releases(ctx.npd_conninfo, config.npd_db.schema)))
+                print(format_status(ctx.catalog, config.catalog, ctx.dialect.published_releases()))
                 return 0
         finally:
             ctx.http.close()

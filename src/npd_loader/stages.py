@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
-from typing import Callable, ContextManager, Iterator, Sequence
+from typing import TYPE_CHECKING, Callable, ContextManager, Iterator, Sequence
 
 import httpx
 
@@ -17,6 +17,9 @@ from npd_loader.catalog import FAILED, Catalog, DataFile, Run
 from npd_loader.config import Config
 from npd_loader.runxml import build_config_xml
 from npd_loader.storage import Storage
+
+if TYPE_CHECKING:
+    from npd_loader.dialect import Dialect
 
 log = logging.getLogger(__name__)
 
@@ -38,7 +41,7 @@ class Context:
     storage: Storage
     http: httpx.Client
     lock: Callable[[str], ContextManager[bool]]
-    npd_conninfo: str | None = None
+    dialect: "Dialect | None" = None
     sleep: Callable[[float], None] = field(default=time.sleep)
 
 

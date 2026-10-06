@@ -10,16 +10,13 @@ import psycopg
 from psycopg import sql
 
 from npd_loader.db import list_parent_tables, list_release_partitions
+from npd_loader.dialect import PublishConflict
 from npd_loader.raw_load import RAW_PARENT
 
 log = logging.getLogger(__name__)
 LOCK_ATTEMPTS = 3
 LOCK_BACKOFF_SECONDS = 2.0
 T = TypeVar("T")
-
-
-class PublishConflict(Exception):
-    pass
 
 
 def locked_transaction(conn: psycopg.Connection, lock_timeout_seconds: float, work: Callable[[], T],

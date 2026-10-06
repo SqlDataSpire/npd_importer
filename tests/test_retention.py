@@ -8,8 +8,9 @@ import pytest
 from psycopg import sql
 
 from npd_loader.db import list_parent_tables, list_release_partitions
+from npd_loader.dialect.postgres import PostgresDialect
 from npd_loader.retention import apply_retention
-from helpers import make_ctx
+from helpers import make_ctx, pg_dialect
 
 BASE = date(2026, 8, 4)
 RELEASES = [BASE + timedelta(weeks=k) for k in range(7)]
@@ -43,7 +44,7 @@ def seed(ctx, release: date, run_class: str = "IMPORT") -> tuple[str, str]:
 
 @pytest.fixture
 def ctx(tmp_path, cms, npd_db):
-    c = make_ctx(tmp_path, cms, npd_conninfo=npd_db)
+    c = make_ctx(tmp_path, cms, dialect=pg_dialect(npd_db))
     c.paths = {}
     with psycopg.connect(npd_db) as conn:
         for i, release in enumerate(RELEASES):
@@ -53,7 +54,7 @@ def ctx(tmp_path, cms, npd_db):
 
 
 def published(ctx):
-    with psycopg.connect(ctx.npd_conninfo) as conn:
+    with psycopg.connect(ctx.dialect.conninfo) as conn:
         raw = sorted(list_release_partitions(conn, "npd_raw", "resource"))
         npd = sorted(list_release_partitions(conn, "npd", "practitioner"))
         rel = [r[0] for r in conn.execute("SELECT release_date FROM npd.release ORDER BY 1")]
@@ -105,15 +106,17 @@ def lock_held(conninfo: str, table: str):
         other.rollback()
 
 
-def set_lock_timeout(ctx, seconds: float) -> None:
-    ctx.config = replace(ctx.config, npd_db=replace(ctx.config.npd_db, lock_timeout_seconds=seconds))
+def set_lock_timeout(ctx, seconds: float, sleep=lambda s: None) -> None:
+    new_cfg = replace(ctx.config.npd_db, lock_timeout_seconds=seconds)
+    ctx.config = replace(ctx.config, npd_db=new_cfg)
+    ctx.dialect = PostgresDialect(ctx.dialect.conninfo, new_cfg, sleep=sleep)
 
 
 def test_locked_parent_gives_up_with_a_warning(ctx):
-    set_lock_timeout(ctx, 1)
     sleeps = []
     ctx.sleep = sleeps.append
-    with lock_held(ctx.npd_conninfo, "npd.practitioner"):
+    set_lock_timeout(ctx, 1, sleep=sleeps.append)
+    with lock_held(ctx.dialect.conninfo, "npd.practitioner"):
         start = time.monotonic()
         warnings = apply_retention(ctx, RELEASES[-1])
         elapsed = time.monotonic() - start

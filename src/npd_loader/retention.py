@@ -5,10 +5,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 
-import psycopg
-
-from npd_loader.db import list_parent_tables, list_release_partitions
-from npd_loader.publish import drop_release
+from npd_loader.dialect import LockUnavailable
 from npd_loader.stages import Context
 
 log = logging.getLogger(__name__)
@@ -26,42 +23,34 @@ def _delete_ndjson(ctx: Context, release: date) -> None:
 
 def apply_retention(ctx: Context, just_imported: date) -> list[str]:
     cfg = ctx.config
-    db = cfg.npd_db
     warnings: list[str] = []
     try:
-        with psycopg.connect(ctx.npd_conninfo) as conn:
-            published: set[date] = set()
-            for schema in (db.raw_schema, db.schema):
-                for parent in list_parent_tables(conn, schema):
-                    published |= set(list_release_partitions(conn, schema, parent))
-            # Keep slots go to releases published in this database (plus the one just imported) only.
-            newest = sorted(published | {just_imported}, reverse=True)[:cfg.retention.keep_releases]
-            keep = set(newest) | {just_imported}
-            # .ndjson only: releases extracted (or imported per the catalog) but not published here, older than
-            # the oldest kept release, e.g. an extract whose import failed and was never retried.
-            extracted = set(ctx.catalog.successful_releases(cfg.catalog.run_class_extract)) \
-                | set(ctx.catalog.successful_releases(cfg.catalog.run_class_import))
-            unpublished = {r for r in extracted - published - keep if r < min(newest)}
-            locked_out = False
-            for release in sorted((published - keep) | unpublished):
-                try:
-                    if release in published:
-                        if locked_out:  # the same parents are still locked; don't wait out the timeout again
-                            warnings.append(f"retention of release {release}: skipped, a table lock was not "
-                                            f"available (retried on the next run)")
-                            continue
-                        dropped = drop_release(conn, db.raw_schema, db.schema, release, db.lock_timeout_seconds,
-                                               ctx.sleep)
-                        log.info("retention dropped %d partitions of release %s", len(dropped), release)
-                    _delete_ndjson(ctx, release)
-                except psycopg.errors.LockNotAvailable as exc:
-                    conn.rollback()
-                    locked_out = True
-                    warnings.append(f"retention of release {release}: gave up waiting for a table lock "
-                                    f"({str(exc).strip()}); retried on the next run")
-                except Exception as exc:
-                    conn.rollback()
-                    warnings.append(f"retention of release {release}: {exc}")
+        published = ctx.dialect.partitioned_releases()
+        # Keep slots go to releases published in this database (plus the one just imported) only.
+        newest = sorted(published | {just_imported}, reverse=True)[:cfg.retention.keep_releases]
+        keep = set(newest) | {just_imported}
+        # .ndjson only: releases extracted (or imported per the catalog) but not published here, older than
+        # the oldest kept release, e.g. an extract whose import failed and was never retried.
+        extracted = set(ctx.catalog.successful_releases(cfg.catalog.run_class_extract)) \
+            | set(ctx.catalog.successful_releases(cfg.catalog.run_class_import))
+        unpublished = {r for r in extracted - published - keep if r < min(newest)}
+        locked_out = False
+        for release in sorted((published - keep) | unpublished):
+            try:
+                if release in published:
+                    if locked_out:  # the same parents are still locked; don't wait out the timeout again
+                        warnings.append(f"retention of release {release}: skipped, a table lock was not "
+                                        f"available (retried on the next run)")
+                        continue
+                    dropped = ctx.dialect.drop_release(release)
+                    log.info("retention dropped %d partitions of release %s", len(dropped), release)
+                _delete_ndjson(ctx, release)
+            except LockUnavailable as exc:
+                locked_out = True
+                warnings.append(f"retention of release {release}: gave up waiting for a table lock "
+                                f"({exc}); retried on the next run")
+            except Exception as exc:
+                warnings.append(f"retention of release {release}: {exc}")
     except Exception as exc:
         warnings.append(f"retention: {exc}")
     for warning in warnings:
