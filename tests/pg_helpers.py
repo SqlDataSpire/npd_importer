@@ -1,7 +1,5 @@
 from datetime import date
 
-from psycopg import sql as _sql
-
 from npd_loader.manifest import resource_type_for
 from npd_loader.raw_load import NdjsonInput, load_raw
 from npd_loader.transform import run_transforms
@@ -33,6 +31,7 @@ def transformed(conn, storage, run_id=7):
 
 
 def rows(conn, result, table: str, columns: str) -> list[tuple]:
+    from psycopg import sql as _sql
     has_seq = conn.execute("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'npd' "
                            "AND table_name = %s AND column_name = 'seq')", (table,)).fetchone()[0]
     order = "resource_id, seq" if has_seq else "resource_id"
