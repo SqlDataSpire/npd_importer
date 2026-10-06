@@ -13,6 +13,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError
 
 from npd_loader.config import NpdDbConfig
+from npd_loader.dialect import TransformResult
 from npd_loader.raw_load import RAW_PARENT, NdjsonInput, RawLoadError, RawLoadResult, iter_lines, validate_line
 from npd_loader.sqltext import render, split_batches, sql_scripts, standalone_name
 from npd_loader.storage import Storage
@@ -219,3 +220,22 @@ class MssqlDialect:
             file_ids = {inp.resource_type: inp.file_id for inp in inputs}
             raise RawLoadError(f"duplicate resource ids: {detail}", file_ids.get(dups[0][0]) if dups else None) from exc
         return RawLoadResult(table, rows)
+
+    def run_transforms(self, raw_table: str, release: date, run_id: int) -> TransformResult:
+        schema = self.cfg.schema
+        with self._autocommit() as conn:
+            tables = {p: self._create_standalone(conn, schema, p, release, run_id)
+                      for p in self.parent_tables(conn, schema)}
+        tokens = {"raw": self.q(self.cfg.raw_schema, raw_table), "release": f"'{release.isoformat()}'",
+                  "schema": self.q(schema), **{f"t:{p}": self.q(schema, n) for p, n in tables.items()}}
+        for script, text in sql_scripts("mssql", "transform"):
+            log.info("running transform %s", script)
+            for batch in split_batches(render(text, tokens)):
+                with self.engine.begin() as conn:          # each statement commits as soon as it lands
+                    conn.exec_driver_sql(batch)
+        counts: dict[str, int] = {}
+        with self._autocommit() as conn:
+            for parent, name in tables.items():
+                self._clone_indexes(conn, schema, parent, name)
+                counts[parent] = conn.exec_driver_sql(f"SELECT COUNT_BIG(*) FROM {self.q(schema, name)}").scalar()
+        return TransformResult(tables, counts)
