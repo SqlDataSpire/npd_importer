@@ -1,11 +1,57 @@
 # npd-loader
 
-Loads the CMS National Provider Directory FHIR bulk release (`https://directory.cms.gov/downloads/`) into
-Postgres: raw JSONB in `npd_raw.resource`, flattened tables in `npd`, one partition per release, the newest
-5 releases kept. Every run and file is recorded in `css_catalog_local` (`master_warehouse_run`, `data_file`).
+Loads the CMS National Provider Directory FHIR bulk release into SQL Server or Postgres
+(`https://directory.cms.gov/downloads/`). On Postgres: raw JSONB in `npd_raw.resource`, flattened tables in `npd`,
+one partition per release, the newest 5 releases kept. Every run and file is recorded in `css_catalog_local` (`master_warehouse_run`, `data_file`).
 Design: `docs/superpowers/specs/2026-10-03-npd-fhir-loader-design.md`.
 
-## Install (192.10.0.7)
+## SQL Server (Windows)
+
+The loader runs against SQL Server 2019+ through Python-DataEngine with Windows authentication. Connections live in a
+DataEngine env file (`database.dev.env` / `database.prd.env` in this repo; no passwords), named by
+`[databases] env_file` in `config.toml`. The `type` of the `data` connection (`mssql` or `postgres`) selects the
+flavor. The catalog is the `catalog` connection: `HIE_WAREHOUSE_META_DEV` for development, `HIE_WAREHOUSE_META` for
+production (`dbo.MASTER_WAREHOUSE_RUN`, `dbo.DATA_FILE`).
+
+### DBA prerequisites
+
+- Databases `npd`, `npd_dev`, `npd_test` on `cssnpi`, recovery model `SIMPLE`.
+- The service account (and developers for `npd_dev`/`npd_test`): `db_owner`, or `db_ddladmin` + `db_datareader` +
+  `db_datawriter` + `ALTER ANY DATASPACE`.
+- `SELECT`, `INSERT`, `UPDATE` on `dbo.MASTER_WAREHOUSE_RUN` and `dbo.DATA_FILE` in each catalog database.
+- Disk: one release used 73 GB on Postgres; page compression reduces that. Plan for several hundred GB at
+  `keep_releases = 5`.
+
+### Install
+
+    py -3.12 -m venv C:\npd-loader\.venv
+    C:\npd-loader\.venv\Scripts\pip install <path to this repo>
+    copy config.example.toml C:\npd-loader\config.toml
+    copy database.prd.env C:\npd-loader\database.prd.env
+    C:\npd-loader\.venv\Scripts\npd-loader --config C:\npd-loader\config.toml init-db
+
+### Schedule (Task Scheduler)
+
+    schtasks /Create /TN "npd-loader" /SC DAILY /ST 06:00 /RU <DOMAIN\service-account> /RP *
+      /TR "C:\npd-loader\.venv\Scripts\npd-loader.exe --config C:\npd-loader\config.toml run"
+
+Logs go to stderr; redirect them in a wrapper `.cmd` if you need a file.
+
+### How it works on SQL Server
+
+Raw lines go into `npd_raw.resource` (`varchar(max)` with a UTF-8 collation), in batches of 5,000 rows, each committed
+as it lands, into a standalone table for the release. T-SQL transforms (`OPENJSON`) fill standalone `npd.*` tables.
+Publish switches every standalone table into its parent's release partition in one transaction (`SPLIT RANGE`,
+`SWITCH`); retention switches old partitions out and `MERGE`s their boundaries. The run lock is `sp_getapplock`.
+
+### Tests
+
+    $env:NPD_TEST_MSSQL_DB = '{"type":"mssql","server":"cssnpi","database":"npd_test","trusted":"yes"}'
+    .\.venv\Scripts\python -m pytest
+
+SQL Server tests create and drop their own schemas in `npd_test` and never touch either catalog database.
+
+## Install on Postgres (192.10.0.7)
 
 ```bash
 sudo mkdir -p /opt/npd-loader /etc/npd-loader /data/npd
@@ -13,7 +59,7 @@ git clone <repo> /opt/npd-loader/src
 python3.12 -m venv /opt/npd-loader/.venv
 /opt/npd-loader/.venv/bin/pip install /opt/npd-loader/src
 sudo cp /opt/npd-loader/src/config.example.toml /etc/npd-loader/config.toml
-sudo chmod 600 /etc/npd-loader/config.toml   # then fill in users and passwords
+sudo chmod 600 /etc/npd-loader/config.toml   # connections: see database.*.env
 /opt/npd-loader/.venv/bin/npd-loader init-db
 ```
 
