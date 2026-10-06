@@ -121,7 +121,7 @@ def mssql_schemas(mssql_engine):
         with mssql_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             for name in names:
                 conn.exec_driver_sql(f"CREATE SCHEMA [{name}]")
-        created.extend(names)
+                created.append(name)
         return names
 
     yield factory
