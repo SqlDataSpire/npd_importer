@@ -3104,3 +3104,32 @@ git commit -m "docs: first full SQL Server dev import"
 git add -A
 git commit -m "refactor(postgres): Postgres flavor on PgConnectionObject (psycopg2); drop psycopg (unverified against a server)"
 ```
+
+---
+
+### Task 15: Parse-once T-SQL transforms (added 2026-10-06 after the Task 13 dev run)
+
+**Why:** the dev import (docs/profile/2026-10-06-mssql-dev-import.md) ran `010_practitioner.sql`'s first INSERT at ~40 rows/s
+(4 h for 1.16M of 7.48M rows; Postgres ran the whole script in 38 min). It is CPU-bound with 20.8 GB of tempdb: every
+`OUTER APPLY` of `ext` / `identifier_value` / `join_text` and every `CROSS APPLY OPENJSON(r.resource, ...)` re-parses the
+whole resource document, the plan adds a Sort + Spool per apply, and each OPENJSON call converts the `varchar(max)` UTF-8
+resource to `nvarchar(max)`. Decision (user, 2026-10-06): keep the transforms as SQL scripts, rewritten so each resource
+document is parsed once.
+
+**Files:**
+- Modify: `src/npd_loader/sql/mssql/transform/010…090_*.sql`, `src/npd_loader/sql/mssql/init/001_schemas.sql` (helper functions, only if changed), `src/npd_loader/dialect/mssql.py` (runner, only if a staging step or chunking needs it)
+- Create: `tests/mssql_bench.py` (benchmark script, not collected by pytest), `docs/profile/2026-10-06-mssql-transform-benchmark.md`
+- Test: `tests/test_mssql_transform.py` (unchanged expectations must still pass)
+
+**Requirements:**
+1. **Parse each raw document once per resource type.** Per resource type, a single pass extracts every scalar the scripts need plus each repeating array as a small JSON fragment: `CROSS APPLY OPENJSON(CAST(r.resource AS nvarchar(max))) WITH (gender varchar(256) '$.gender', active nvarchar(10) '$.active', extension nvarchar(max) AS JSON, identifier nvarchar(max) AS JSON, name nvarchar(max) AS JSON, telecom nvarchar(max) AS JSON, …)` (one `CAST` per row). Every later lookup (extensions by url, identifier by system, the name pick, child-table rows) reads those small fragments, never `r.resource` again. If several INSERTs of one script need the same fragments, materialize them once per script into a scratch heap in the data schema (`<<schema>>.[__stage_<type>__r<run>]`-style name produced by the runner, dropped at the end of the script and matched by orphan cleanup's `__r<run>` pattern), `SELECT … INTO` with `TABLOCK`, rather than re-parsing per INSERT.
+2. **No per-row Sort/Spool on large values.** Extension lookups use one pass over the small `extension` fragment with conditional aggregation (`MAX(CASE WHEN url = N'…' THEN valueBoolean END)` etc.) instead of one `TOP 1 … ORDER BY` apply per url; the identifier pick and the official-name pick may use `TOP 1 … ORDER BY` over the small fragment. Drop or rewrite the `ext` / `identifier_value` / `join_text` iTVFs if they no longer earn their place (keep `ref_id`, `fhir_ts` scalar functions).
+3. **Same output.** Same target tables and columns, same 1-based `seq`, same `extra_lines` skip, same official-name ordering, plain `CAST` (strict). `tests/test_mssql_transform.py` and `tests/test_mssql_e2e.py` pass with unchanged expectations.
+4. **Benchmark before any full run.** `tests/mssql_bench.py` copies a sample of 100,000 rows of each resource type (or all rows if fewer) from the dev raw table `npd_dev.npd_raw.resource__20260929__r7009` (read-only `SELECT TOP (100000) … INTO`) into a scratch schema in `npd_test`, runs `init_db` + `run_transforms` there, prints rows/s per script, and drops the scratch schema. Record old vs new timing per script (old = the current scripts on the same sample) in `docs/profile/2026-10-06-mssql-transform-benchmark.md`.
+5. **Target:** extrapolated from the sample, all nine scripts for the full release (24.85M raw resources) in ≤ 58 min (the Postgres time); `010_practitioner.sql` ≤ 38 min. If the target is missed after the parse-once rewrite, add chunking by resource_id range (commit per chunk) and/or report with numbers rather than guessing further.
+
+- [ ] **Step 1:** Write `tests/mssql_bench.py`; run it against the current scripts; record baseline per script.
+- [ ] **Step 2:** Rewrite the scripts (and helpers/runner if needed) per Requirements 1–3.
+- [ ] **Step 3:** `pytest tests -k mssql` passes with unchanged expectations.
+- [ ] **Step 4:** Re-run the benchmark; record new per-script numbers and the extrapolation; check against the target.
+- [ ] **Step 5:** Commit (scripts, helpers, runner, bench script, profile doc).
