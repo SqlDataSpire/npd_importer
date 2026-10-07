@@ -2176,7 +2176,7 @@ def test_every_reference_column_has_a_target():
         for name, col in t.cols.items():
             assert name.endswith("_id") == (col.target is not None), f"{t.name}.{name}"
             assert col.target is None or col.target in SPECS, f"{t.name}.{name}"
-    assert sum(len(ref_columns(t)) for t in ALL_TABLES) == 18
+    assert sum(len(ref_columns(t)) for t in ALL_TABLES) == 19
 ```
 
 In `tests/test_flatten_stagefiles.py` `test_flatten_file_writes_rows_and_hashes`, change the expected practitioner id:
@@ -2276,7 +2276,7 @@ def _ref_table(name: str, each: str, column: str, target: str) -> Table:
     return Table(name, {column: E("reference", target=target)}, each=each)
 ```
 
-Delete the unused `REF = {...}` constant. Then each reference column (18):
+Delete the unused `REF = {...}` constant. Then each reference column (19; the table omits `insurance_plan_network.network_organization_id`, `_ref_table(..., "network_organization_id", "Organization")`):
 
 | table | column | becomes |
 |---|---|---|
@@ -2462,7 +2462,7 @@ p.write_text(s, encoding="utf-8")
 assert "resource_id" not in s and "_id varchar" not in s and "resource_type" not in s, "leftover text ids"
 ```
 
-Expected diff: 26 `resource_key int NOT NULL`, 26 PKs on `resource_key`, 18 `<name>_key int`, the three reference
+Expected diff: 26 `resource_key int NOT NULL`, 26 PKs on `resource_key`, 19 `<name>_key int`, the three reference
 indexes (`location_managing_organization`, `practitioner_role_practitioner`, `practitioner_role_organization`) on
 `_key` columns, identifier without `resource_type`. Index names stay.
 
