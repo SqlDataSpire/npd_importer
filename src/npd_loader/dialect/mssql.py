@@ -17,7 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from npd_loader.config import NpdDbConfig
 from npd_loader.dialect import DeltaResult, LockUnavailable, StageResult
 from npd_loader.dialect.bcp import bcp_in, bcp_target
-from npd_loader.flatten.engine import columns
+from npd_loader.flatten.engine import columns, ref_columns
 from npd_loader.flatten.specs import ALL_TABLES, TABLE_TYPES
 from npd_loader.flatten.stagefiles import HASH_COLUMNS, HASH_TABLE, FlattenError, flatten_files
 from npd_loader.sqltext import render, split_batches, sql_scripts
@@ -65,6 +65,12 @@ class MssqlDialect:
             "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? "
             "ORDER BY ORDINAL_POSITION", (schema, table))]
 
+    def _stage_select(self, t) -> str:
+        """Select list that shapes a staging heap from its permanent table: text ids where the table has keys."""
+        text_ids = {"resource_id": "varchar(128)", "resource_type": "varchar(40)"} | {c: "varchar(128)" for c in ref_columns(t)}
+        return ", ".join(f"CAST(NULL AS {text_ids[c]}) AS {self.q(c)}" if c in text_ids else f"x.{self.q(c)}"
+                         for c in columns(t))
+
     def init_db(self) -> None:
         tokens = self._tokens()
         schema, stage = self.cfg.schema, self.cfg.stage_schema
@@ -86,8 +92,8 @@ class MssqlDialect:
                     conn.exec_driver_sql(f"DROP TABLE {self.q(stage, t.name)}")
                     have = []
                 if not have:
-                    cols = ", ".join(self.q(c) for c in columns(t))
-                    conn.exec_driver_sql(f"SELECT TOP 0 {cols} INTO {self.q(stage, t.name)} FROM {self.q(schema, t.name)}")
+                    conn.exec_driver_sql(f"SELECT TOP 0 {self._stage_select(t)} INTO {self.q(stage, t.name)} "
+                                         f"FROM {self.q(schema, t.name)} x")
                 conn.exec_driver_sql(f"CREATE OR ALTER VIEW {self.q(schema, 'v_' + t.name)} AS "
                                      f"SELECT * FROM {self.q(schema, t.name)}")
             if conn.exec_driver_sql("SELECT is_read_committed_snapshot_on FROM sys.databases "
