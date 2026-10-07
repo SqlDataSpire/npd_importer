@@ -3,20 +3,22 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the Phase 1 import (raw JSON table, T-SQL transforms, partition-SWITCH publish of per-release
-snapshots) with Python flattening from declarative table specs, `bcp` into per-run staging tables, and a one-transaction
+snapshots) with Python flattening from declarative table specs, `bcp` into fixed staging tables, and a one-transaction
 delta upsert into a single current dataset in SQL Server.
 
-**Architecture:** Each `.ndjson` is streamed by a worker process that parses every line once with `orjson`, hashes it
-and flattens it with the 26 table specs into stage files (field `0x1F`, row `0x1E`). `MssqlDialect.stage_release` bulk
-loads those files with `bcp` into `npd_stage.<table>__r<run>` heaps; `MssqlDialect.apply_delta` classifies every
-resource as new/changed/unchanged/deleted against `npd.resource_state` and, in one transaction, replaces the rows of
-changed/deleted resources and inserts new ones. Download, extract, the catalog and the CLI are unchanged.
+**Architecture:** Each `.ndjson` is streamed by a worker process that parses every line once with `orjson` (no JSON
+ever reaches SQL Server), hashes it and flattens it with the 26 table specs into stage files (field `0x1F`, row
+`0x1E`). `MssqlDialect.stage_release` truncates the fixed staging tables `npd_stage.<table>` and bulk loads the files
+with `bcp`; `MssqlDialect.apply_delta` classifies every resource as new/changed/unchanged against
+`npd.resource_state` and, in one transaction, upserts: replaces the rows of changed resources and inserts new ones.
+Resources missing from a release stay live (aging data); `resource_state.last_seen_release` records when each was last
+seen. Download, extract, the catalog and the CLI are unchanged; the `.ndjson.zst` originals are the backup.
 
 **Tech Stack:** Python 3.12, orjson, Python-DataEngine (SQLAlchemy + pyodbc), `bcp.exe` (ODBC 17/18 tools), SQL Server
 2019, pytest.
 
-**Spec:** `docs/superpowers/specs/2026-10-06-phase2-python-flatten-upsert-design.md` (approved 2026-10-06; proposed
-decisions P1–P4 accepted as proposed: hard delete, SHA-1 of the raw line, SQL Server only, branch
+**Spec:** `docs/superpowers/specs/2026-10-06-phase2-python-flatten-upsert-design.md` (approved 2026-10-06, revised
+2026-10-07: fixed staging tables, no deletions — aging data stays live; SHA-1 of the raw line; SQL Server only; branch
 `feature/phase2-flatten`).
 
 ## Global Constraints
@@ -28,9 +30,9 @@ decisions P1–P4 accepted as proposed: hard delete, SHA-1 of the raw line, SQL 
 - Tests never touch `HIE_WAREHOUSE_META*`, `npd` or `npd_dev`; SQL Server tests use `NPD_TEST_MSSQL_DB` (`cssnpi.npd_test`) scratch schemas and skip when it is unset.
 - Stage files: `bcp -c -C 65001`, field terminator `0x1F`, row terminator `0x1E`, `NULL` = empty field with `-k`; a value containing `\x1f` or `\x1e` is rejected naming file and line.
 - `bcp` success is judged by its output (`N rows copied`, no `Error`) and by row counts in the staging table — never by its exit code alone.
-- Every staging table name ends in `__r<run_id>` and lives in `NpdDbConfig.stage_schema` (default `npd_stage`).
+- Staging is a fixed set of tables in `NpdDbConfig.stage_schema` (default `npd_stage`): `npd_stage.<table>` for each of the 26 tables plus `npd_stage.resource_hash`, created by `init-db`, truncated at the start of every import. No per-run tables are ever created or dropped.
 - The delta apply is exactly one transaction (`SET XACT_ABORT ON`, `LOCK_TIMEOUT`, whole-transaction retry on error 1222 as in Phase 1).
-- Deleted resources are hard-deleted (P1); only resource types present in the release can have deletions; more than `max_delete_share` (default 0.2) of a type's current rows marked deleted fails the run before applying.
+- Nothing is ever deleted because it is missing from a release (P1, user 2026-10-07): those resources stay live; `resource_state.last_seen_release` / `last_seen_run_id` record the last release that contained each resource. Only the rows of a *changed* resource are replaced.
 - Change detection hash: SHA-1 hex of the line's UTF-8 bytes without the line terminator (P2).
 - Converter semantics follow Phase 1: FHIR dateTime → UTC `datetime2(3)` rounded half-up to milliseconds, partial dates (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`) → midnight; extensions/identifiers/name pick = first match by array position; `location.description` longer than 4000 characters → NULL.
 - Commit messages end with a blank line, then `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
@@ -39,9 +41,9 @@ decisions P1–P4 accepted as proposed: hard delete, SHA-1 of the raw line, SQL 
 ## Review Focus
 
 1. A release older than the newest applied one (e.g. `import --release` of last month) → refused with a clear message unless `--force` (Task 9 test).
-2. A truncated or partial CMS file that drops most of a type → the deletion safety check fails the run and nothing changes (Task 8 test).
-3. A value longer than its column (e.g. a 300-character city) → the run fails naming the table and the bcp error, staging dropped, nothing applied (Task 7 test).
-4. An import killed during staging → the next import drops its `__r<run>` stage tables and the catalog run is closed as interrupted (Task 9 test).
+2. A truncated or partial CMS file that drops most of a type → nothing is deleted, the missing resources keep their old `last_seen_release`, and the release's `not_seen_resources` count shows the gap (Task 8 test).
+3. A value longer than its column (e.g. a 1,500-character city) → the run fails naming the table and the bcp error, nothing applied (Task 7 test).
+4. An import killed after loading staging → the next import truncates staging before loading, so stale rows are never applied, and the catalog run is closed as interrupted (Task 9 test).
 5. A failure inside the apply transaction → the previous current state is fully intact (Task 8 test).
 
 ---
@@ -56,8 +58,8 @@ decisions P1–P4 accepted as proposed: hard delete, SHA-1 of the raw line, SQL 
 | `src/npd_loader/flatten/specs.py` | the 26 table specs, `SPECS` (by resource type), `ALL_TABLES`, `tables_for(resource_type)` |
 | `src/npd_loader/flatten/stagefiles.py` | per-file streaming worker, chunked stage writers, hash rows, `flatten_files` (process pool), `FlattenError` |
 | `src/npd_loader/dialect/bcp.py` | `bcp_target(engine)`, `bcp_in(...)` with output/count checks, `BcpError` |
-| `src/npd_loader/dialect/mssql.py` | Phase 2 `MssqlDialect`: init_db, run_lock, published_releases, stage_release, apply_delta, drop_stage_tables |
-| `src/npd_loader/dialect/__init__.py` | Phase 2 `Dialect` protocol, `StageResult`, `DeltaResult`, `DeltaRejected`, `dialect_for` |
+| `src/npd_loader/dialect/mssql.py` | Phase 2 `MssqlDialect`: init_db (incl. fixed staging tables), run_lock, published_releases, truncate_stage, stage_release, apply_delta |
+| `src/npd_loader/dialect/__init__.py` | Phase 2 `Dialect` protocol, `StageResult`, `DeltaResult`, `dialect_for` |
 | `src/npd_loader/sql/mssql/init/001_schemas.sql`, `003_tables.sql`, `900_migrations.sql` | Phase 2 schema |
 | `src/npd_loader/import_stage.py`, `retention.py`, `config.py`, `cli.py` | rewired import, file-only retention, new config keys |
 | `tests/golden/fixture_tables.json`, `tests/make_golden.py` | Phase 1 output for the fixture release (golden values for the specs) |
@@ -1015,8 +1017,8 @@ git commit -m "feat(flatten): streaming per-file worker writing chunked bcp stag
 - Test: `tests/test_mssql_schema.py` (rewrite), `tests/conftest.py` (`mssql_dialect` fixture)
 
 **Interfaces:**
-- Produces: `NpdDbConfig(connection: str, schema: str = "npd", stage_schema: str = "npd_stage", lock_timeout_seconds: float = 30.0, max_delete_share: float = 0.2, flatten_workers: int = 4, bcp_workers: int = 8)`; a config with `raw_schema` raises `ConfigError` mentioning `stage_schema`; `stage_schema == schema` raises `ConfigError`.
-- Produces: tables `npd.resource_state` and extended `npd.release` (see SQL below); permanent tables with clustered primary keys and no partitioning; `MssqlDialect._tokens()` = `schema`, `s:schema`, `stage_schema`, `s:stage_schema`; `MssqlDialect.init_db()` runs the init scripts and creates `v_<table>` pass-through views for every table in `ALL_TABLES`.
+- Produces: `NpdDbConfig(connection: str, schema: str = "npd", stage_schema: str = "npd_stage", lock_timeout_seconds: float = 30.0, flatten_workers: int = 4, bcp_workers: int = 8)`; a config with `raw_schema` raises `ConfigError` mentioning `stage_schema`; `stage_schema == schema` raises `ConfigError`.
+- Produces: tables `npd.resource_state` and extended `npd.release` (see SQL below); permanent tables with clustered primary keys and no partitioning; the fixed staging tables `npd_stage.<table>` (same columns as `columns(t)`, heaps) and `npd_stage.resource_hash` (columns `HASH_COLUMNS`); `MssqlDialect._tokens()` = `schema`, `s:schema`, `stage_schema`, `s:stage_schema`; `MssqlDialect.init_db()` runs the init scripts, creates any missing staging table, and creates `v_<table>` pass-through views for every table in `ALL_TABLES`.
 - Fixture `mssql_dialect` (tests/conftest.py): fresh `t<hex>` and `t<hex>_stage` schemas, `NpdDbConfig(connection="data", schema=data, stage_schema=stage, lock_timeout_seconds=2, flatten_workers=1, bcp_workers=4)`, `init_db()` run.
 
 - [ ] **Step 1: Config** — in `config.py` replace `NpdDbConfig` with:
@@ -1028,7 +1030,6 @@ class NpdDbConfig:
     schema: str = "npd"
     stage_schema: str = "npd_stage"
     lock_timeout_seconds: float = 30.0   # how long the delta apply waits for a table lock (3 attempts)
-    max_delete_share: float = 0.2        # fail an import that would delete more than this share of a type's rows
     flatten_workers: int = 4             # parallel .ndjson files being flattened
     bcp_workers: int = 8                 # parallel bcp loads
 ```
@@ -1036,9 +1037,9 @@ class NpdDbConfig:
 and in `parse_config` build it with
 `NpdDbConfig(connection=_req(npd, "npd_db", "connection"), **_optional({k: v for k, v in npd.items() if k != "connection"}, "npd_db", NpdDbConfig))`
 after this check: `if "raw_schema" in npd: raise ConfigError("[npd_db] raw_schema was replaced by stage_schema (Phase 2 has no raw table)")`.
-Range checks: `lock_timeout_seconds > 0`; `0 < max_delete_share <= 1`; `flatten_workers >= 1`; `bcp_workers >= 1`;
+Range checks: `lock_timeout_seconds > 0`; `flatten_workers >= 1`; `bcp_workers >= 1`;
 `schema != stage_schema` (each with a `ConfigError` naming the key). In `config.example.toml` `[npd_db]` replace
-`raw_schema = "npd_raw"` with `stage_schema = "npd_stage"` and add `max_delete_share = 0.2`. In `tests/helpers.py`
+`raw_schema = "npd_raw"` with `stage_schema = "npd_stage"`. In `tests/helpers.py`
 `config_data(...)`: `schemas` becomes `("npd_stage", "npd")` → `"npd_db": {"connection": "data", "stage_schema": schemas[0], "schema": schemas[1]}`.
 Update `tests/test_config.py`: replace `cfg.npd_db.raw_schema == "npd_raw"` with `cfg.npd_db.stage_schema == "npd_stage"`;
 the old `raw_schema == schema` test becomes `stage_schema == schema`; add:
@@ -1051,7 +1052,7 @@ def test_raw_schema_key_is_rejected():
         parse_config(data)
 
 
-@pytest.mark.parametrize("key,value", [("max_delete_share", 0), ("max_delete_share", 1.5), ("flatten_workers", 0)])
+@pytest.mark.parametrize("key,value", [("flatten_workers", 0), ("bcp_workers", 0), ("lock_timeout_seconds", 0)])
 def test_phase2_ranges(key, value):
     data = minimal()
     data["npd_db"][key] = value
@@ -1083,20 +1084,38 @@ IF OBJECT_ID(<<s:schema>> + N'.release', N'U') IS NULL
         new_resources       int          NULL,
         changed_resources   int          NULL,
         unchanged_resources int          NULL,
-        deleted_resources   int          NULL
+        not_seen_resources  int          NULL
     )
 GO
--- The current version of every resource: its content hash decides new/changed/unchanged/deleted.
+-- The current version of every resource: its content hash decides new/changed/unchanged. Resources missing from a
+-- release are kept (aging data); last_seen_release is the last release that contained them.
 IF OBJECT_ID(<<s:schema>> + N'.resource_state', N'U') IS NULL
     CREATE TABLE <<schema>>.resource_state (
-        resource_type varchar(40)  NOT NULL,
-        resource_id   varchar(128) NOT NULL,
-        hash          char(40)     NOT NULL,
-        last_updated  datetime2(3) NULL,
-        release_date  date         NOT NULL,
-        run_id        int          NOT NULL,
+        resource_type     varchar(40)  NOT NULL,
+        resource_id       varchar(128) NOT NULL,
+        hash              char(40)     NOT NULL,
+        last_updated      datetime2(3) NULL,
+        release_date      date         NOT NULL,   -- release whose content is current
+        run_id            int          NOT NULL,
+        last_seen_release date         NOT NULL,
+        last_seen_run_id  int          NOT NULL,
         CONSTRAINT pk_resource_state PRIMARY KEY CLUSTERED (resource_type, resource_id)
     ) WITH (DATA_COMPRESSION = PAGE)
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(<<s:schema>> + N'.resource_state') AND name = N'resource_state_last_seen')
+    CREATE INDEX resource_state_last_seen ON <<schema>>.resource_state (last_seen_release) WITH (DATA_COMPRESSION = PAGE)
+GO
+-- Fixed staging for resource hashes (the 26 table stages are created by init_db from the specs).
+IF OBJECT_ID(<<s:stage_schema>> + N'.resource_hash', N'U') IS NULL
+    CREATE TABLE <<stage_schema>>.resource_hash (
+        resource_type  varchar(40)  NOT NULL,
+        resource_id    varchar(128) NOT NULL,
+        hash           char(40)     NOT NULL,
+        last_updated   datetime2(3) NULL,
+        release_date   date         NOT NULL,
+        ndjson_file_id int          NOT NULL,
+        line_number    bigint       NOT NULL
+    )
 GO
 -- Phase 1 helper functions are no longer used.
 DROP FUNCTION IF EXISTS <<schema>>.ref_id
@@ -1116,7 +1135,7 @@ initialised by an earlier Phase 2 build gets the release counters:
 ```sql
 IF COL_LENGTH(<<s:schema>> + N'.release', N'new_resources') IS NULL
     ALTER TABLE <<schema>>.release ADD new_resources int NULL, changed_resources int NULL,
-        unchanged_resources int NULL, deleted_resources int NULL
+        unchanged_resources int NULL, not_seen_resources int NULL
 ```
 
 Delete `002_raw.sql`. Convert `003_tables.sql` with this one-off script (run once from the repo root, then commit the
@@ -1156,16 +1175,25 @@ print("converted")
                 "stage_schema": self.q(self.cfg.stage_schema), "s:stage_schema": self.lit(self.cfg.stage_schema)}
 
     def init_db(self) -> None:
+        from npd_loader.flatten.engine import columns
         from npd_loader.flatten.specs import ALL_TABLES
         tokens = self._tokens()
+        schema, stage = self.cfg.schema, self.cfg.stage_schema
         with self._autocommit() as conn:
             for name, text in sql_scripts("mssql", "init"):
                 for batch in split_batches(render(text, tokens)):
                     conn.exec_driver_sql(batch)
             for t in ALL_TABLES:
-                conn.exec_driver_sql(f"CREATE OR ALTER VIEW {self.q(self.cfg.schema, 'v_' + t.name)} AS "
-                                     f"SELECT * FROM {self.q(self.cfg.schema, t.name)}")
+                # fixed staging heap, same columns (in spec order) as the permanent table; created once, reused
+                if conn.exec_driver_sql("SELECT OBJECT_ID(?, 'U')", (f"{stage}.{t.name}",)).scalar() is None:
+                    cols = ", ".join(self.q(c) for c in columns(t))
+                    conn.exec_driver_sql(f"SELECT TOP 0 {cols} INTO {self.q(stage, t.name)} FROM {self.q(schema, t.name)}")
+                conn.exec_driver_sql(f"CREATE OR ALTER VIEW {self.q(schema, 'v_' + t.name)} AS "
+                                     f"SELECT * FROM {self.q(schema, t.name)}")
 ```
+
+A column added later to a permanent table (via `900_migrations.sql`) must be added to its staging table in the same
+migration; `test_tables_have_spec_columns_and_primary_keys` checks both.
 
 `published_releases()` stays as it is. (The Phase 1 methods are removed in Task 10.)
 
@@ -1206,13 +1234,18 @@ def test_tables_have_spec_columns_and_primary_keys(mssql_dialect):
             assert cols == columns(t), t.name
             assert conn.exec_driver_sql("SELECT count(*) FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID(?) "
                                         "AND type = 'PK'", (f"{d.cfg.schema}.{t.name}",)).scalar() == 1, t.name
+            stage_cols = [r[0] for r in conn.exec_driver_sql(
+                "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(?) ORDER BY column_id",
+                (f"{d.cfg.stage_schema}.{t.name}",))]
+            assert stage_cols == columns(t), f"stage {t.name}"
+    assert scalar(d, "SELECT count(*) FROM sys.tables WHERE schema_id = SCHEMA_ID(?)", d.cfg.stage_schema) == 27
     assert scalar(d, "SELECT count(*) FROM sys.partition_functions WHERE name LIKE ?", f"pf_{d.cfg.schema}%") == 0
     assert scalar(d, "SELECT count(*) FROM sys.views WHERE schema_id = SCHEMA_ID(?)", d.cfg.schema) == 26
     assert scalar(d, "SELECT count(*) FROM sys.objects WHERE schema_id = SCHEMA_ID(?) AND type IN ('FN','IF')",
                   d.cfg.schema) == 0
-    for col in ("hash", "release_date", "run_id"):
+    for col in ("hash", "release_date", "run_id", "last_seen_release", "last_seen_run_id"):
         assert scalar(d, "SELECT COL_LENGTH(?, ?)", f"{d.cfg.schema}.resource_state", col) is not None
-    assert scalar(d, "SELECT COL_LENGTH(?, 'deleted_resources')", f"{d.cfg.schema}.release") is not None
+    assert scalar(d, "SELECT COL_LENGTH(?, 'not_seen_resources')", f"{d.cfg.schema}.release") is not None
 
 
 def test_init_db_is_idempotent(mssql_dialect):
@@ -1230,22 +1263,23 @@ Run only the listed files in this task.)
 
 ```bash
 git add -A src/npd_loader/config.py config.example.toml src/npd_loader/sql/mssql/init src/npd_loader/dialect/mssql.py tests/test_config.py tests/helpers.py tests/conftest.py tests/test_mssql_schema.py
-git commit -m "feat(phase2): unpartitioned current-dataset schema, resource_state, stage schema config"
+git commit -m "feat(phase2): unpartitioned current-dataset schema, resource_state, fixed staging tables"
 ```
 
 ---
 
-### Task 7: bcp loader and `stage_release`
+### Task 7: bcp loader and `stage_release` (fixed staging tables)
 
 **Files:**
 - Create: `src/npd_loader/dialect/bcp.py`
-- Modify: `src/npd_loader/dialect/mssql.py`
+- Modify: `src/npd_loader/dialect/mssql.py`, `src/npd_loader/dialect/__init__.py`
 - Test: `tests/test_mssql_stage.py`
 
 **Interfaces:**
-- Consumes: `flatten_files`, `FlattenResult`, `HASH_TABLE`, `HASH_COLUMNS`, `FlattenError` (Task 5); `ALL_TABLES`, `columns` (Tasks 3–4); `NdjsonInput`.
+- Consumes: `flatten_files`, `FlattenResult`, `HASH_TABLE`, `FlattenError` (Task 5); `ALL_TABLES` (Task 4); the fixed staging tables from `init_db` (Task 6); `NdjsonInput`.
 - Produces (`npd_loader.dialect.bcp`): `class BcpError(Exception)`; `bcp_target(engine) -> tuple[str, str]` (server, database from the ODBC connect string); `bcp_in(server, database, schema, table, path, expected_rows) -> int`.
-- Produces on `MssqlDialect`: `stage_name(table, run_id) -> str` (`f"{table}__r{run_id}"`); `stage_release(storage, release: date, run_id: int, inputs: list[NdjsonInput]) -> StageResult` (StageResult defined here in `npd_loader.dialect`: `@dataclass StageResult(rows: dict[str, int], resources: dict[str, int])`); `drop_stage_tables(run_id: int | None = None) -> list[str]`.
+- Produces (`npd_loader.dialect`): `@dataclass StageResult(rows: dict[str, int], resources: dict[str, int])`.
+- Produces on `MssqlDialect`: `truncate_stage() -> None` (truncates all 27 staging tables); `stage_release(storage, release: date, run_id: int, inputs: list[NdjsonInput]) -> StageResult` (truncate, flatten, bcp, verify counts, duplicate check).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1284,9 +1318,18 @@ def test_stage_release_loads_every_table(mssql_dialect, tmp_path):
     storage = LocalStorage(tmp_path / "data")
     res = d.stage_release(storage, R, 7, inputs_for(storage, build_release("2026-09-29").ndjson))
     assert sum(res.resources.values()) == 12
-    assert count(d, "resource_hash__r7") == 12
-    assert count(d, "practitioner__r7") == 2 and count(d, "identifier__r7") == res.rows["identifier"]
+    assert count(d, "resource_hash") == 12
+    assert count(d, "practitioner") == 2 and count(d, "identifier") == res.rows["identifier"]
     assert not list((tmp_path / "data" / "stage").rglob("*.dat"))          # stage files deleted after load
+
+
+def test_each_import_starts_from_empty_staging(mssql_dialect, tmp_path):
+    d = mssql_dialect
+    storage = LocalStorage(tmp_path / "data")
+    inputs = inputs_for(storage, build_release("2026-09-29").ndjson)
+    d.stage_release(storage, R, 7, inputs)
+    d.stage_release(storage, R, 8, inputs)                                   # e.g. after a killed run
+    assert count(d, "resource_hash") == 12 and count(d, "practitioner") == 2
 
 
 def test_duplicate_ids_name_the_file(mssql_dialect, tmp_path):
@@ -1304,15 +1347,6 @@ def test_too_long_value_fails_with_the_bcp_error(mssql_dialect, tmp_path):
     rec = {**fixture_data.ORG1, "address": [{"city": "x" * 1500}]}         # organization_address.city nvarchar(1000)
     with pytest.raises(BcpError, match="organization_address"):
         d.stage_release(storage, R, 7, inputs_for(storage, {"01-Organization.ndjson": orjson.dumps(rec) + b"\n"}))
-
-
-def test_drop_stage_tables(mssql_dialect, tmp_path):
-    d = mssql_dialect
-    storage = LocalStorage(tmp_path / "data")
-    d.stage_release(storage, R, 7, inputs_for(storage, build_release("2026-09-29").ndjson))
-    dropped = d.drop_stage_tables(7)
-    assert f"{d.cfg.stage_schema}.resource_hash__r7" in dropped and len(dropped) == 27
-    assert d.drop_stage_tables() == []
 ```
 
 - [ ] **Step 2: Run to verify failure**
@@ -1358,95 +1392,62 @@ def bcp_in(server: str, database: str, schema: str, table: str, path: str, expec
     return copied
 ```
 
-- [ ] **Step 4: Implement `stage_release` and `drop_stage_tables` in `MssqlDialect`** (add imports: `import os`,
-`import shutil`, `from concurrent.futures import ThreadPoolExecutor`, `from npd_loader.dialect import StageResult`,
-`from npd_loader.dialect.bcp import bcp_in, bcp_target`, `from npd_loader.flatten.engine import columns`,
-`from npd_loader.flatten.specs import ALL_TABLES`,
-`from npd_loader.flatten.stagefiles import HASH_COLUMNS, HASH_TABLE, FlattenError, flatten_files`). Add to
+Hex terminators (`-t 0x1f -r 0x1e`) are documented for bcp, and the spike proved `-r 0x0a` works. If the installed
+bcp rejects them anyway, stop and report NEEDS_CONTEXT with the bcp output rather than switching formats.
+
+- [ ] **Step 4: Implement `truncate_stage` and `stage_release` in `MssqlDialect`** (imports: `import shutil`,
+`from concurrent.futures import ThreadPoolExecutor`, `from npd_loader.dialect import StageResult`,
+`from npd_loader.dialect.bcp import bcp_in, bcp_target`, `from npd_loader.flatten.specs import ALL_TABLES`,
+`from npd_loader.flatten.stagefiles import HASH_TABLE, FlattenError, flatten_files`). Add to
 `src/npd_loader/dialect/__init__.py`:
 
 ```python
 @dataclass
 class StageResult:
-    rows: dict[str, int]          # rows loaded per stage table (incl. resource_hash)
+    rows: dict[str, int]          # rows loaded per staging table (incl. resource_hash)
     resources: dict[str, int]     # resources per resource type
 ```
 
 Methods:
 
 ```python
-    STAGE_RE = r"__r{run}$"
+    def _stage_tables(self) -> list[str]:
+        return [t.name for t in ALL_TABLES] + [HASH_TABLE]
 
-    @staticmethod
-    def stage_name(table: str, run_id: int) -> str:
-        return f"{table}__r{run_id}"
-
-    def _create_stage_tables(self, run_id: int) -> None:
-        s = self.cfg.stage_schema
+    def truncate_stage(self) -> None:
         with self._autocommit() as conn:
-            for t in ALL_TABLES:
-                cols = ", ".join(self.q(c) for c in columns(t))
-                conn.exec_driver_sql(f"SELECT TOP 0 {cols} INTO {self.q(s, self.stage_name(t.name, run_id))} "
-                                     f"FROM {self.q(self.cfg.schema, t.name)}")
-            conn.exec_driver_sql(
-                f"CREATE TABLE {self.q(s, self.stage_name(HASH_TABLE, run_id))} (resource_type varchar(40) NOT NULL, "
-                f"resource_id varchar(128) NOT NULL, hash char(40) NOT NULL, last_updated datetime2(3) NULL, "
-                f"release_date date NOT NULL, ndjson_file_id int NOT NULL, line_number bigint NOT NULL)")
+            for table in self._stage_tables():
+                conn.exec_driver_sql(f"TRUNCATE TABLE {self.q(self.cfg.stage_schema, table)}")
 
     def stage_release(self, storage, release: date, run_id: int, inputs: list) -> StageResult:
+        """Empty the fixed staging tables, flatten the release's files in parallel and bcp them in. Holding the import
+        lock, this is the only writer of staging; leftovers of a killed run are removed by the truncate."""
         s = self.cfg.stage_schema
-        self._create_stage_tables(run_id)
+        self.truncate_stage()
         out_dir = storage.local_path(f"stage/run_{run_id}")
         try:
             flat = flatten_files(inputs, storage, release, out_dir, self.cfg.flatten_workers)
             server, database = bcp_target(self.engine)
             with ThreadPoolExecutor(self.cfg.bcp_workers) as pool:
-                futures = [pool.submit(bcp_in, server, database, s, self.stage_name(f.table, run_id), f.path, f.rows)
-                           for f in flat.files]
+                futures = [pool.submit(bcp_in, server, database, s, f.table, f.path, f.rows) for f in flat.files]
                 for fut in futures:
                     fut.result()
         finally:
             shutil.rmtree(out_dir, ignore_errors=True)
         with self.engine.connect() as conn:
             for table, expected in flat.rows.items():
-                got = conn.exec_driver_sql(f"SELECT COUNT_BIG(*) FROM {self.q(s, self.stage_name(table, run_id))}").scalar()
+                got = conn.exec_driver_sql(f"SELECT COUNT_BIG(*) FROM {self.q(s, table)}").scalar()
                 if got != expected:
-                    raise FlattenError(f"stage table {table}: flattened {expected} rows but loaded {got}")
-        self._check_duplicates(run_id, inputs)
-        return StageResult(flat.rows, flat.resources)
-
-    def _check_duplicates(self, run_id: int, inputs: list) -> None:
-        hashes = self.q(self.cfg.stage_schema, self.stage_name(HASH_TABLE, run_id))
-        try:
-            with self._autocommit() as conn:
-                conn.exec_driver_sql(f"CREATE UNIQUE CLUSTERED INDEX ux_hash ON {hashes} (resource_type, resource_id)")
-        except DBAPIError as exc:
-            if error_number(exc) != 1505:
-                raise
-            with self.engine.connect() as conn:
-                dups = conn.exec_driver_sql(
-                    f"SELECT TOP 20 resource_type, resource_id, MIN(ndjson_file_id), STRING_AGG(CAST(line_number AS "
-                    f"varchar(20)), ',') WITHIN GROUP (ORDER BY line_number) FROM {hashes} "
-                    f"GROUP BY resource_type, resource_id HAVING COUNT(*) > 1 ORDER BY 1, 2").fetchall()
+                    raise FlattenError(f"staging table {table}: flattened {expected} rows but loaded {got}")
+            dups = conn.exec_driver_sql(
+                f"SELECT TOP 20 resource_type, resource_id, MIN(ndjson_file_id), STRING_AGG(CAST(line_number AS "
+                f"varchar(20)), ',') WITHIN GROUP (ORDER BY line_number) FROM {self.q(s, HASH_TABLE)} "
+                f"GROUP BY resource_type, resource_id HAVING COUNT(*) > 1 ORDER BY 1, 2").fetchall()
+        if dups:
             detail = "; ".join(f"{t} {i} at lines {lines}" for t, i, _, lines in dups)
-            raise FlattenError(f"duplicate resource ids: {detail}", dups[0][2] if dups else None) from exc
-
-    def drop_stage_tables(self, run_id: int | None = None) -> list[str]:
-        """Drop the stage tables of import `run_id` (any run when None). Only safe with the import lock held."""
-        pattern = re.compile(self.STAGE_RE.format(run=run_id if run_id is not None else r"\d+"))
-        dropped: list[str] = []
-        with self._autocommit() as conn:
-            names = [r[0] for r in conn.exec_driver_sql(
-                "SELECT name FROM sys.tables WHERE schema_id = SCHEMA_ID(?) ORDER BY name", (self.cfg.stage_schema,))]
-            for name in names:
-                if pattern.search(name):
-                    conn.exec_driver_sql(f"DROP TABLE {self.q(self.cfg.stage_schema, name)}")
-                    dropped.append(f"{self.cfg.stage_schema}.{name}")
-        return dropped
+            raise FlattenError(f"duplicate resource ids: {detail}", dups[0][2])
+        return StageResult(flat.rows, flat.resources)
 ```
-
-Hex terminators (`-t 0x1f -r 0x1e`) are documented for bcp, and the spike proved `-r 0x0a` works. If the installed
-bcp rejects them anyway, stop and report NEEDS_CONTEXT with the bcp output rather than switching formats.
 
 - [ ] **Step 5: Run the tests**
 
@@ -1457,32 +1458,28 @@ Expected: PASS (4 tests).
 
 ```bash
 git add src/npd_loader/dialect/bcp.py src/npd_loader/dialect/mssql.py src/npd_loader/dialect/__init__.py tests/test_mssql_stage.py
-git commit -m "feat(phase2): stage_release — parallel flatten, bcp into per-run stage heaps, count and duplicate checks"
+git commit -m "feat(phase2): stage_release — truncate fixed staging, parallel flatten, bcp, count and duplicate checks"
 ```
 
 ---
 
-### Task 8: `apply_delta`
+### Task 8: `apply_delta` (upsert; aging data stays live)
 
 **Files:**
 - Modify: `src/npd_loader/dialect/mssql.py`, `src/npd_loader/dialect/__init__.py`
 - Test: `tests/test_mssql_delta.py`
 
 **Interfaces:**
-- Consumes: `stage_release`, `stage_name`, `_locked_transaction`, `drop_stage_tables` (Task 7); `SPECS`, `TABLE_TYPES`, `ALL_TABLES`, `columns`.
-- Produces (`npd_loader.dialect`): `class DeltaRejected(Exception)`; `@dataclass DeltaResult(kinds: dict[str, dict[str, int]], inserted: dict[str, int], removed: dict[str, int])` (`kinds[resource_type] = {"new":…, "changed":…, "unchanged":…, "deleted":…}`).
-- Produces on `MssqlDialect`: `apply_delta(release: date, run_id: int) -> DeltaResult` — classifies, checks `max_delete_share`, applies in one transaction, writes `npd.release`, drops the run's stage tables, updates statistics (best effort).
+- Consumes: `stage_release`, `_locked_transaction` (Phase 1), `ALL_TABLES`, `TABLE_TYPES`, `columns`, `HASH_TABLE`.
+- Produces (`npd_loader.dialect`): `@dataclass DeltaResult(kinds: dict[str, dict[str, int]], inserted: dict[str, int], replaced: dict[str, int])` (`kinds[resource_type] = {"new":…, "changed":…, "unchanged":…, "not_seen":…}`; `replaced` = rows removed from a table because their resource changed).
+- Produces on `MssqlDialect`: `apply_delta(release: date, run_id: int) -> DeltaResult` — classifies against `resource_state`, upserts in one transaction, updates `last_seen_*` for every resource in the release, writes `npd.release`, updates statistics (best effort). Never deletes a resource that is missing from the release.
 
 - [ ] **Step 1: Write the failing tests**
 
 ```python
 import copy
-import dataclasses
 from datetime import date
 
-import pytest
-
-from npd_loader.dialect import DeltaRejected
 from npd_loader.storage import LocalStorage
 from release_builder import build_release
 from test_mssql_stage import inputs_for
@@ -1509,87 +1506,94 @@ def test_first_load_inserts_everything(mssql_dialect, tmp_path):
     assert sum(k["new"] for k in res.kinds.values()) == 12
     assert rows(d, f"SELECT count(*) FROM {d.q(d.cfg.schema, 'resource_state')}") == [(12,)]
     assert rows(d, f"SELECT count(*) FROM {d.q(d.cfg.schema, 'practitioner')}") == [(2,)]
-    assert rows(d, f"SELECT import_run_id, new_resources, deleted_resources FROM {d.q(d.cfg.schema, 'release')}") == [(7, 12, 0)]
-    assert d.drop_stage_tables() == []                                   # stage dropped after apply
+    assert rows(d, f"SELECT import_run_id, new_resources, not_seen_resources FROM {d.q(d.cfg.schema, 'release')}") == [(7, 12, 0)]
 
 
-def test_second_release_applies_only_the_delta(mssql_dialect, tmp_path):
+def test_second_release_upserts_and_keeps_aging_data(mssql_dialect, tmp_path):
     d = mssql_dialect
     load(d, tmp_path, R1, 7)
     records = copy.deepcopy(fixture_data.RECORDS)
     p = records["06-Practitioner.ndjson"][0]
     p["name"][0]["family"] = "GOMEZ-CHANGED"
     p["telecom"] = p["telecom"][:1]                                       # child rows shrink
-    removed = records["08-OrganizationAffiliation.ndjson"].pop()          # one resource deleted
-    d.cfg = dataclasses.replace(d.cfg, max_delete_share=1.0)
+    missing = records["08-OrganizationAffiliation.ndjson"].pop()          # not in the new release
     res = load(d, tmp_path, R2, 8, records)
-    assert res.kinds["Practitioner"] == {"new": 0, "changed": 1, "unchanged": 1, "deleted": 0}
-    assert res.kinds["OrganizationAffiliation"]["deleted"] == 1
-    pid = p["id"]
-    assert rows(d, f"SELECT name_family FROM {d.q(d.cfg.schema, 'practitioner')} WHERE resource_id = ?", pid) == [("GOMEZ-CHANGED",)]
-    assert rows(d, f"SELECT count(*) FROM {d.q(d.cfg.schema, 'practitioner_telecom')} WHERE resource_id = ?", pid) == [(1,)]
-    assert rows(d, f"SELECT count(*) FROM {d.q(d.cfg.schema, 'organization_affiliation')} WHERE resource_id = ?",
-                removed["id"]) == [(0,)]
-    assert rows(d, f"SELECT count(*) FROM {d.q(d.cfg.schema, 'identifier')} WHERE resource_id = ?", removed["id"]) == [(0,)]
-    assert rows(d, f"SELECT release_date FROM {d.q(d.cfg.schema, 'resource_state')} WHERE resource_id = ?", pid) == [(R2,)]
-    assert [r[0] for r in rows(d, f"SELECT release_date FROM {d.q(d.cfg.schema, 'release')} ORDER BY 1")] == [R1, R2]
+    assert res.kinds["Practitioner"] == {"new": 0, "changed": 1, "unchanged": 1, "not_seen": 0}
+    assert res.kinds["OrganizationAffiliation"]["not_seen"] == 1
+    pid, sch = p["id"], d.cfg.schema
+    assert rows(d, f"SELECT name_family FROM {d.q(sch, 'practitioner')} WHERE resource_id = ?", pid) == [("GOMEZ-CHANGED",)]
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'practitioner_telecom')} WHERE resource_id = ?", pid) == [(1,)]
+    # aging data stays live, with its last-seen release
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'organization_affiliation')} WHERE resource_id = ?", missing["id"]) == [(1,)]
+    assert rows(d, f"SELECT last_seen_release FROM {d.q(sch, 'resource_state')} WHERE resource_id = ?", missing["id"]) == [(R1,)]
+    # content release vs last seen
+    assert rows(d, f"SELECT release_date, last_seen_release FROM {d.q(sch, 'resource_state')} WHERE resource_id = ?",
+                pid) == [(R2, R2)]
+    unchanged = records["06-Practitioner.ndjson"][1]["id"]
+    assert rows(d, f"SELECT release_date, last_seen_release FROM {d.q(sch, 'resource_state')} WHERE resource_id = ?",
+                unchanged) == [(R1, R2)]
+    assert rows(d, f"SELECT not_seen_resources FROM {d.q(sch, 'release')} WHERE release_date = ?", R2) == [(1,)]
 
 
-def test_too_many_deletions_are_rejected(mssql_dialect, tmp_path):
+def test_partial_file_deletes_nothing(mssql_dialect, tmp_path):
     d = mssql_dialect
     load(d, tmp_path, R1, 7)
     records = copy.deepcopy(fixture_data.RECORDS)
-    records["01-Organization.ndjson"] = records["01-Organization.ndjson"][:1]      # 1 of 2 orgs gone = 50%
-    with pytest.raises(DeltaRejected, match="Organization"):
-        load(d, tmp_path, R2, 8, records)
-    assert rows(d, f"SELECT count(*) FROM {d.q(d.cfg.schema, 'organization')}") == [(2,)]   # nothing applied
+    records["01-Organization.ndjson"] = records["01-Organization.ndjson"][:1]      # truncated file
+    res = load(d, tmp_path, R2, 8, records)
+    assert res.kinds["Organization"]["not_seen"] == 1
+    assert rows(d, f"SELECT count(*) FROM {d.q(d.cfg.schema, 'organization')}") == [(2,)]
 
 
-def test_failure_inside_apply_rolls_back(mssql_dialect, tmp_path, monkeypatch):
+def test_failure_inside_apply_rolls_back(mssql_dialect, tmp_path):
     d = mssql_dialect
     load(d, tmp_path, R1, 7)
     records = copy.deepcopy(fixture_data.RECORDS)
     records["06-Practitioner.ndjson"][0]["gender"] = "unknown"
     storage = LocalStorage(tmp_path / "data8")
     d.stage_release(storage, R2, 8, inputs_for(storage, build_release(R2.isoformat(), records=records).ndjson))
-    with d._autocommit() as c:                                            # sabotage one stage table
-        c.exec_driver_sql(f"DROP TABLE {d.q(d.cfg.stage_schema, 'practitioner_role__r8')}")
-    with pytest.raises(Exception):
-        d.apply_delta(R2, 8)
-    assert rows(d, f"SELECT gender FROM {d.q(d.cfg.schema, 'practitioner')} ORDER BY resource_id")[0] == ("male",)
-    assert [r[0] for r in rows(d, f"SELECT release_date FROM {d.q(d.cfg.schema, 'release')}")] == [R1]
+    with d._autocommit() as c:                                            # sabotage one staging table
+        c.exec_driver_sql(f"EXEC sp_rename '{d.cfg.stage_schema}.practitioner_role', 'practitioner_role_x'")
+    try:
+        try:
+            d.apply_delta(R2, 8)
+            raise AssertionError("apply_delta should have failed")
+        except Exception as exc:
+            assert "practitioner_role" in str(exc)
+        assert rows(d, f"SELECT gender FROM {d.q(d.cfg.schema, 'practitioner')} ORDER BY resource_id")[0] == ("male",)
+        assert [r[0] for r in rows(d, f"SELECT release_date FROM {d.q(d.cfg.schema, 'release')}")] == [R1]
+    finally:
+        with d._autocommit() as c:
+            c.exec_driver_sql(f"EXEC sp_rename '{d.cfg.stage_schema}.practitioner_role_x', 'practitioner_role'")
 ```
 
 - [ ] **Step 2: Run to verify failure**
 
 Run: `.\.venv\Scripts\python -m pytest tests/test_mssql_delta.py -v`
-Expected: FAIL (`ImportError: DeltaRejected`).
+Expected: FAIL (`AttributeError: ... 'apply_delta'`).
 
 - [ ] **Step 3: Implement.** Add to `src/npd_loader/dialect/__init__.py`:
 
 ```python
-class DeltaRejected(Exception):
-    """The release would delete more than max_delete_share of a resource type's current rows."""
-
-
 @dataclass
 class DeltaResult:
-    kinds: dict[str, dict[str, int]]   # resource type -> {"new", "changed", "unchanged", "deleted"}
+    kinds: dict[str, dict[str, int]]   # resource type -> {"new", "changed", "unchanged", "not_seen"}
     inserted: dict[str, int]           # rows inserted per table
-    removed: dict[str, int]            # rows deleted per table
+    replaced: dict[str, int]           # rows removed per table because their resource changed
 ```
 
-In `MssqlDialect` (imports: `from npd_loader.dialect import DeltaRejected, DeltaResult`,
-`from npd_loader.flatten.specs import SPECS, TABLE_TYPES`):
+In `MssqlDialect` (imports: `from npd_loader.dialect import DeltaResult`,
+`from npd_loader.flatten.engine import columns`, `from npd_loader.flatten.specs import TABLE_TYPES`):
 
 ```python
-    KINDS = {"N": "new", "C": "changed", "U": "unchanged", "D": "deleted"}
+    KINDS = {"N": "new", "C": "changed", "U": "unchanged"}
 
     def apply_delta(self, release: date, run_id: int) -> DeltaResult:
+        """Upsert the staged release: replace the rows of changed resources, insert new ones, mark every resource of
+        the release as seen. Resources missing from the release are kept (aging data)."""
         s, schema = self.cfg.stage_schema, self.cfg.schema
-        hashes = self.q(s, self.stage_name(HASH_TABLE, run_id))
-        delta = self.q(s, self.stage_name("delta", run_id))
-        state = self.q(schema, "resource_state")
+        hashes, state = self.q(s, HASH_TABLE), self.q(schema, "resource_state")
+        delta = self.q(s, "delta")
         with self._autocommit() as conn:
             conn.exec_driver_sql(f"DROP TABLE IF EXISTS {delta}")
             conn.exec_driver_sql(
@@ -1597,70 +1601,67 @@ In `MssqlDialect` (imports: `from npd_loader.dialect import DeltaRejected, Delta
                 f"CAST(CASE WHEN st.resource_id IS NULL THEN 'N' WHEN st.hash <> h.hash THEN 'C' ELSE 'U' END AS char(1)) AS kind "
                 f"INTO {delta} FROM {hashes} h LEFT JOIN {state} st "
                 f"ON st.resource_type = h.resource_type AND st.resource_id = h.resource_id")
-            conn.exec_driver_sql(
-                f"INSERT INTO {delta} (resource_type, resource_id, hash, last_updated, kind) "
-                f"SELECT st.resource_type, st.resource_id, st.hash, st.last_updated, 'D' FROM {state} st "
-                f"WHERE st.resource_type IN (SELECT DISTINCT resource_type FROM {hashes}) AND NOT EXISTS "
-                f"(SELECT 1 FROM {hashes} h WHERE h.resource_type = st.resource_type AND h.resource_id = st.resource_id)")
             conn.exec_driver_sql(f"CREATE UNIQUE CLUSTERED INDEX ux_delta ON {delta} (resource_type, resource_id)")
             kinds: dict[str, dict[str, int]] = {}
             for rtype, kind, n in conn.exec_driver_sql(
                     f"SELECT resource_type, kind, COUNT_BIG(*) FROM {delta} GROUP BY resource_type, kind"):
-                kinds.setdefault(rtype, dict.fromkeys(self.KINDS.values(), 0))[self.KINDS[kind]] = n
-            current = dict(conn.exec_driver_sql(f"SELECT resource_type, COUNT_BIG(*) FROM {state} GROUP BY resource_type"))
-        too_many = [f"{t}: {k['deleted']} of {current[t]}" for t, k in kinds.items()
-                    if current.get(t) and k["deleted"] / current[t] > self.cfg.max_delete_share]
-        if too_many:
-            raise DeltaRejected(f"release {release} would delete more than {self.cfg.max_delete_share:.0%} of "
-                                f"current rows ({'; '.join(too_many)}); check the CMS files or raise "
-                                f"[npd_db] max_delete_share")
+                kinds.setdefault(rtype, {"new": 0, "changed": 0, "unchanged": 0, "not_seen": 0})[self.KINDS[kind]] = n
+            for rtype, n in conn.exec_driver_sql(
+                    f"SELECT st.resource_type, COUNT_BIG(*) FROM {state} st WHERE NOT EXISTS (SELECT 1 FROM {delta} d "
+                    f"WHERE d.resource_type = st.resource_type AND d.resource_id = st.resource_id) "
+                    f"GROUP BY st.resource_type"):
+                kinds.setdefault(rtype, {"new": 0, "changed": 0, "unchanged": 0, "not_seen": 0})["not_seen"] = n
 
         def work(conn) -> tuple[dict[str, int], dict[str, int]]:
-            inserted, removed = {}, {}
+            inserted, replaced = {}, {}
             for t in ALL_TABLES:
-                target, staged = self.q(schema, t.name), self.q(s, self.stage_name(t.name, run_id))
-                type_match = "d.resource_type = x.resource_type" if TABLE_TYPES[t.name] is None \
-                    else f"d.resource_type = '{TABLE_TYPES[t.name]}'"
-                removed[t.name] = conn.exec_driver_sql(
-                    f"DELETE x FROM {target} x JOIN {delta} d ON d.resource_id = x.resource_id AND {type_match} "
-                    f"AND d.kind IN ('C', 'D')").rowcount
+                target, staged = self.q(schema, t.name), self.q(s, t.name)
+                rtype = TABLE_TYPES[t.name]
+                match = "d.resource_type = x.resource_type" if rtype is None else f"d.resource_type = '{rtype}'"
+                replaced[t.name] = conn.exec_driver_sql(
+                    f"DELETE x FROM {target} x JOIN {delta} d ON d.resource_id = x.resource_id AND {match} "
+                    f"AND d.kind = 'C'").rowcount
                 cols = ", ".join(self.q(c) for c in columns(t))
                 inserted[t.name] = conn.exec_driver_sql(
                     f"INSERT INTO {target} WITH (TABLOCK) ({cols}) SELECT {cols} FROM {staged} x WHERE EXISTS "
-                    f"(SELECT 1 FROM {delta} d WHERE d.resource_id = x.resource_id AND {type_match} "
+                    f"(SELECT 1 FROM {delta} d WHERE d.resource_id = x.resource_id AND {match} "
                     f"AND d.kind IN ('N', 'C'))").rowcount
-            conn.exec_driver_sql(f"DELETE st FROM {state} st JOIN {delta} d ON d.resource_type = st.resource_type "
-                                 f"AND d.resource_id = st.resource_id AND d.kind IN ('C', 'D')")
-            conn.exec_driver_sql(f"INSERT INTO {state} (resource_type, resource_id, hash, last_updated, release_date, "
-                                 f"run_id) SELECT resource_type, resource_id, hash, last_updated, ?, ? FROM {delta} "
-                                 f"WHERE kind IN ('N', 'C')", (release, run_id))
-            totals = {k: sum(v[k] for v in kinds.values()) for k in self.KINDS.values()}
+            conn.exec_driver_sql(
+                f"MERGE {state} AS st USING {delta} AS d "
+                f"ON st.resource_type = d.resource_type AND st.resource_id = d.resource_id "
+                f"WHEN MATCHED AND d.kind = 'C' THEN UPDATE SET hash = d.hash, last_updated = d.last_updated, "
+                f"release_date = ?, run_id = ?, last_seen_release = ?, last_seen_run_id = ? "
+                f"WHEN MATCHED THEN UPDATE SET last_seen_release = ?, last_seen_run_id = ? "
+                f"WHEN NOT MATCHED THEN INSERT (resource_type, resource_id, hash, last_updated, release_date, run_id, "
+                f"last_seen_release, last_seen_run_id) VALUES (d.resource_type, d.resource_id, d.hash, d.last_updated, "
+                f"?, ?, ?, ?);",
+                (release, run_id, release, run_id, release, run_id, release, run_id, release, run_id))
+            totals = {k: sum(v[k] for v in kinds.values()) for k in ("new", "changed", "unchanged", "not_seen")}
             conn.exec_driver_sql(
                 f"MERGE {self.q(schema, 'release')} AS t USING (SELECT CAST(? AS date) AS release_date) AS s "
                 f"ON t.release_date = s.release_date "
                 f"WHEN MATCHED THEN UPDATE SET import_run_id = ?, published_at = SYSUTCDATETIME(), new_resources = ?, "
-                f"changed_resources = ?, unchanged_resources = ?, deleted_resources = ? "
+                f"changed_resources = ?, unchanged_resources = ?, not_seen_resources = ? "
                 f"WHEN NOT MATCHED THEN INSERT (release_date, import_run_id, new_resources, changed_resources, "
-                f"unchanged_resources, deleted_resources) VALUES (s.release_date, ?, ?, ?, ?, ?);",
-                (release, run_id, totals["new"], totals["changed"], totals["unchanged"], totals["deleted"],
-                 run_id, totals["new"], totals["changed"], totals["unchanged"], totals["deleted"]))
-            return inserted, removed
+                f"unchanged_resources, not_seen_resources) VALUES (s.release_date, ?, ?, ?, ?, ?);",
+                (release, run_id, totals["new"], totals["changed"], totals["unchanged"], totals["not_seen"],
+                 run_id, totals["new"], totals["changed"], totals["unchanged"], totals["not_seen"]))
+            return inserted, replaced
 
-        inserted, removed = self._locked_transaction(work, f"apply release {release}")
+        inserted, replaced = self._locked_transaction(work, f"apply release {release}")
         log.info("applied release %s: %s", release, {t: k for t, k in sorted(kinds.items())})
-        self.drop_stage_tables(run_id)
         with self._autocommit() as conn:            # best effort: the delta is already committed
             for t in ALL_TABLES:
-                if inserted.get(t.name) or removed.get(t.name):
+                if inserted.get(t.name) or replaced.get(t.name):
                     try:
                         conn.exec_driver_sql(f"UPDATE STATISTICS {self.q(schema, t.name)}")
                     except Exception as exc:
                         log.warning("UPDATE STATISTICS %s.%s failed: %s", schema, t.name, exc)
-        return DeltaResult(kinds, inserted, removed)
+        return DeltaResult(kinds, inserted, replaced)
 ```
 
-Note: `kind` for resource types with only unchanged/new rows still gets all four keys (the `dict.fromkeys` default).
-A resource type that has no file in the release has no rows in `hashes`, so it gets no deletions.
+`npd_stage.delta` is a scratch table rebuilt by each apply (it is not one of the 27 staging tables `truncate_stage`
+handles, and `init_db` does not create it).
 
 - [ ] **Step 4: Run the tests**
 
@@ -1671,7 +1672,7 @@ Expected: PASS.
 
 ```bash
 git add src/npd_loader/dialect/mssql.py src/npd_loader/dialect/__init__.py tests/test_mssql_delta.py
-git commit -m "feat(phase2): apply_delta — classify by hash, deletion safety check, one-transaction upsert"
+git commit -m "feat(phase2): apply_delta — classify by hash, one-transaction upsert, aging data kept with last_seen"
 ```
 
 ---
@@ -1683,7 +1684,7 @@ git commit -m "feat(phase2): apply_delta — classify by hash, deletion safety c
 - Test: `tests/test_mssql_import.py` (new), `tests/test_retention.py` (rewrite), `tests/test_dialect_factory.py` (update)
 
 **Interfaces:**
-- Consumes: `stage_release`, `apply_delta`, `drop_stage_tables`, `published_releases`, `StageResult`, `DeltaResult`, `DeltaRejected`, `FlattenError`.
+- Consumes: `stage_release`, `apply_delta`, `published_releases`, `StageResult`, `DeltaResult`, `FlattenError`.
 - Produces: Phase 2 `Dialect` protocol:
 
 ```python
@@ -1696,7 +1697,6 @@ class Dialect(Protocol):
     def published_releases(self) -> list[date]: ...
     def stage_release(self, storage: "Storage", release: date, run_id: int, inputs: "list[NdjsonInput]") -> StageResult: ...
     def apply_delta(self, release: date, run_id: int) -> DeltaResult: ...
-    def drop_stage_tables(self, run_id: int | None = None) -> list[str]: ...
 ```
 
 `dialect_for`: a `postgresql` engine raises `ConfigError("Phase 2 supports SQL Server only; the Postgres loader is on main")`
@@ -1747,15 +1747,18 @@ def test_older_release_is_refused_without_force(ctx, cms):
     assert run_import(ctx, release=date(2026, 9, 29), force=True) is Outcome.SUCCESS
 
 
-def test_killed_run_stage_tables_are_dropped_and_run_closed(ctx, cms):
+def test_killed_run_leftovers_are_never_applied_and_run_closed(ctx, cms):
     cms.publish(build_release("2026-09-29"))
     run_download(ctx)
     d = ctx.dialect
-    with d._autocommit() as c:                                     # leftovers of a killed run 99
-        c.exec_driver_sql(f"CREATE TABLE {d.q(d.cfg.stage_schema, 'practitioner__r99')} (x int)")
+    with d._autocommit() as c:                                     # a killed run left a stale staged practitioner
+        c.exec_driver_sql(f"INSERT INTO {d.q(d.cfg.stage_schema, 'practitioner')} (release_date, resource_id, "
+                          f"ndjson_file_id, zst_file_id) VALUES ('2026-01-01', 'Practitioner-STALE', 1, 2)")
     open_run = ctx.catalog.start_run("IMPORT", "killed", "<WAREHOUSE_RUN_CONFIG />")
     assert run_import(ctx) is Outcome.SUCCESS
-    assert d.drop_stage_tables() == []
+    with d.engine.connect() as c:
+        assert c.exec_driver_sql(f"SELECT count(*) FROM {d.q(d.cfg.schema, 'practitioner')} "
+                                 f"WHERE resource_id = 'Practitioner-STALE'").scalar() == 0
     assert ctx.catalog.runs[open_run.id]["status"] == "Failed"
 
 
@@ -1767,7 +1770,7 @@ def test_flatten_error_is_recorded_on_the_file(ctx, cms):
         run_import(ctx)
     org = [f for f in ctx.catalog.files.values() if (f.get("file_name") or "").endswith("01-Organization.ndjson")]
     assert org and "missing id" in (org[0].get("exceptions") or "")
-    assert ctx.dialect.drop_stage_tables() == []
+    assert ctx.dialect.published_releases() == []
 ```
 
 (`make_ctx` gained `dialect=` in Phase 1; FakeCatalog stores files under `.files` with the keys used above — check
@@ -1811,24 +1814,14 @@ Expected: FAIL.
 
 - [ ] **Step 3: Implement.** `src/npd_loader/import_stage.py` — replace imports of `PublishConflict`, `RAW_PARENT`,
 `RawLoadError` with `from npd_loader.dialect import DeltaResult, StageResult` and
-`from npd_loader.flatten.stagefiles import FlattenError`; keep `NdjsonInput` from `raw_load`. Replace `_drop_orphans`,
-`_import` and the error handling:
+`from npd_loader.flatten.stagefiles import FlattenError`; keep `NdjsonInput` from `raw_load`. Delete `_drop_orphans`
+and its call in `run_import` (staging is truncated by `stage_release`, so there is nothing to clean up after a killed
+run; `close_interrupted_runs` stays). Add `_summary`, replace `_import` and the error handling:
 
 ```python
-def _drop_orphans(ctx: Context) -> None:
-    """With the import lock held no import is running, so stage tables of an earlier run are orphans."""
-    try:
-        dropped = ctx.dialect.drop_stage_tables()
-    except Exception:
-        log.exception("could not drop orphaned stage tables")
-        return
-    if dropped:
-        log.warning("dropped %d stage tables of earlier interrupted imports: %s", len(dropped), ", ".join(dropped))
-
-
 def _summary(staged: StageResult, delta: DeltaResult, schema: str) -> list[dict]:
     items: list[dict] = [{"resource_type": t, **k} for t, k in sorted(delta.kinds.items())]
-    items += [{"table": f"{schema}.{t}", "inserted": delta.inserted.get(t, 0), "deleted": delta.removed.get(t, 0),
+    items += [{"table": f"{schema}.{t}", "inserted": delta.inserted.get(t, 0), "replaced": delta.replaced.get(t, 0),
                "staged": staged.rows.get(t, 0)} for t in sorted(delta.inserted)]
     return items
 
@@ -1881,10 +1874,6 @@ In `run_import`'s `except` block replace the `RawLoadError` check and the standa
         except Exception as exc:
             if isinstance(exc, FlattenError) and exc.file_id is not None:
                 ctx.catalog.update_data_file(exc.file_id, exceptions=str(exc))
-            try:
-                ctx.dialect.drop_stage_tables(run.id)
-            except Exception:
-                log.exception("could not drop stage tables of run %s", run.id)
             fail_run(ctx, run, exc)
             raise StageFailed(f"import of release {release} failed: {exc}") from exc
 ```
@@ -2011,7 +2000,6 @@ def test_two_releases_end_to_end(tmp_path, cms, mssql_doc, mssql_engine, mssql_s
     env = write_env_file(tmp_path / "database.env", {"data": mssql_doc, "catalog": mssql_doc})
     cfg = config_data(tmp_path / "data", cms.manifest_url, env_file=env, schemas=(stage, data),
                       catalog_tables=(cat_cfg.run_table, cat_cfg.file_table), keep_releases=1)
-    cfg["npd_db"]["max_delete_share"] = 1.0
     (tmp_path / "config.toml").write_text(to_toml(cfg))
     cli = lambda *a: main(["--config", str(tmp_path / "config.toml"), *a])
     scalar = lambda q: mssql_engine.connect().exec_driver_sql(q).scalar()
@@ -2025,14 +2013,15 @@ def test_two_releases_end_to_end(tmp_path, cms, mssql_doc, mssql_engine, mssql_s
 
     records = copy.deepcopy(fixture_data.RECORDS)
     records["06-Practitioner.ndjson"][0]["gender"] = "female"
-    gone = records["08-OrganizationAffiliation.ndjson"].pop()
+    aging = records["08-OrganizationAffiliation.ndjson"].pop()
     cms.publish(build_release("2026-10-06", records=records))
     assert cli("run") == 0
     assert scalar(f"SELECT count(*) FROM [{data}].[practitioner] WHERE gender = 'female'") == 2
-    assert scalar(f"SELECT count(*) FROM [{data}].[organization_affiliation] WHERE resource_id = '{gone['id']}'") == 0
+    assert scalar(f"SELECT count(*) FROM [{data}].[organization_affiliation] WHERE resource_id = '{aging['id']}'") == 1
     assert scalar(f"SELECT changed_resources FROM [{data}].[release] WHERE release_date = '2026-10-06'") == 1
-    assert scalar(f"SELECT deleted_resources FROM [{data}].[release] WHERE release_date = '2026-10-06'") == 1
-    assert scalar(f"SELECT count(*) FROM sys.tables WHERE schema_id = SCHEMA_ID('{stage}')") == 0
+    assert scalar(f"SELECT not_seen_resources FROM [{data}].[release] WHERE release_date = '2026-10-06'") == 1
+    assert scalar(f"SELECT CAST(last_seen_release AS varchar(10)) FROM [{data}].[resource_state] "
+                  f"WHERE resource_id = '{aging['id']}'") == "2026-09-29"
     assert not list((tmp_path / "data").rglob("*2026-09-29*/*.ndjson"))      # keep_releases = 1: old .ndjson gone
     capsys.readouterr()
     assert cli("status") == 0
@@ -2053,7 +2042,7 @@ Expected: PASS. Fix failures in the owning module, not the test.
 
 ```bash
 git add tests/test_mssql_e2e.py
-git commit -m "test(phase2): two releases end to end through the CLI (first load, then delta with change and delete)"
+git commit -m "test(phase2): two releases end to end through the CLI (first load, then upsert; aging data kept)"
 ```
 
 ---
@@ -2067,7 +2056,7 @@ Prerequisites (ask the user before starting): the Phase 1 tables for 2026-09-29 
 finish script ran); writing a new IMPORT run to `HIE_WAREHOUSE_META_DEV` is approved.
 
 - [ ] **Step 1: Configure** `config.phase2.local.toml` (gitignored by `*.local.toml`) from `config.local.toml` with
-`[npd_db] schema = "npd2"`, `stage_schema = "npd2_stage"`, `max_delete_share = 0.2`. Ask the user whether to enable
+`[npd_db] schema = "npd2"`, `stage_schema = "npd2_stage"`. Ask the user whether to enable
 `READ_COMMITTED_SNAPSHOT` on `npd_dev` now (`ALTER DATABASE [npd_dev] SET READ_COMMITTED_SNAPSHOT ON`, needs a moment
 with no other connections); the run works either way, readers just block during the apply without it.
 - [ ] **Step 2: Run** `npd-loader --config config.phase2.local.toml init-db`, then

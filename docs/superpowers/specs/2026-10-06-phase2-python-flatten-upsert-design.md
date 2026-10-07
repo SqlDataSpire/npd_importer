@@ -39,24 +39,25 @@ raw load plus transforms. Weekly deltas are expected to be a small fraction of t
 
 | Topic | Decision |
 |---|---|
-| Parsing | In Python, once per resource, with `orjson`, while reading the `.ndjson`. |
+| Parsing | In Python, once per resource, with `orjson`, while reading the `.ndjson`, before anything reaches SQL Server. The database only ever receives flattened rows; no JSON is stored or parsed there. |
 | Flattening | Declarative table specs (one per output table) applied by one generic flattener; no per-type code. |
-| Raw JSON in SQL Server | Not stored. The `.ndjson.zst` files stay on disk as the raw record (catalog-tracked, as today). |
-| Staging | Per-run, per-table heaps in a staging schema, bulk-loaded with `bcp` (minimal logging, TABLOCK). |
+| Raw JSON in SQL Server | Not stored. The original `.ndjson.zst` files stay on disk permanently as the backup of every release (catalog-tracked, as today); `extract` recreates the `.ndjson` of any release to inspect earlier data. |
+| Staging | One fixed staging table per output table (plus one for resource hashes) in a staging schema, created by `init-db`, truncated at the start of every import and bulk-loaded with `bcp` (minimal logging, TABLOCK). No per-run tables. |
 | Permanent tables | One current dataset; not partitioned; keyed by `resource_id` (+ `seq` for child tables). |
 | Delta | Per-resource content hash compared with the stored hash of the current version. |
-| Apply | One transaction per import: replace every changed/deleted resource's rows, insert new ones. Readers see the old or the new state, never a mix (`READ_COMMITTED_SNAPSHOT ON`). |
+| Apply | One transaction per import: upsert — replace the rows of every changed resource, insert new ones. Readers see the old or the new state, never a mix (`READ_COMMITTED_SNAPSHOT ON`). |
+| Aging data | Resources missing from a new release are kept live, never deleted (user, 2026-10-07). `npd.resource_state` records the last release that contained each resource, so aging data can be queried. |
 | Removed | `npd_raw`, the T-SQL transform scripts, partition functions/schemes, standalone tables and SWITCH publish, retention by release. |
 | Kept | DOWNLOAD and EXTRACT stages, the catalog (`HIE_WAREHOUSE_META*`), `database.env` connections, Windows auth, the CLI commands. |
 
-### Proposed decisions — confirm in review
+### Decisions confirmed in review (2026-10-06/07)
 
-| # | Question | Proposed | Alternative |
-|---|---|---|---|
-| P1 | Resources missing from a new release | Hard delete their rows; count them in the run output | Soft delete (`deleted_in_release` column) and keep rows |
-| P2 | Hash basis | SHA-1 of the raw line bytes (cheap; a CMS key-order change shows as "changed" once) | Hash of `orjson.dumps(..., OPT_SORT_KEYS)` (robust, ~2× parse cost) |
-| P3 | Postgres flavor | SQL Server only for Phase 2 (`main` remains the Postgres loader) | Keep the dialect split and add a Postgres COPY/MERGE path later |
-| P4 | Where the work lives | New branch `feature/phase2-flatten` off `feature/sqlport-v1` | Continue on `feature/sqlport-v1` |
+| # | Question | Decision |
+|---|---|---|
+| P1 | Resources missing from a new release | Kept live, never deleted; `resource_state.last_seen_release` shows how long ago each was seen (user, 2026-10-07) |
+| P2 | Hash basis | SHA-1 of the raw line bytes (cheap; a CMS key-order change shows as "changed" once) |
+| P3 | Postgres flavor | SQL Server only for Phase 2 (`main` remains the Postgres loader) |
+| P4 | Where the work lives | New branch `feature/phase2-flatten` off `feature/sqlport-v1` |
 
 ## Design
 
@@ -68,7 +69,7 @@ One `Table` per output table: its name, an optional repeating element (`each="te
 extension by url), `identifier(systems)` (first identifier by system), `official_name` (official, else with a use,
 else first). Every row gets `resource_id` and the file lineage columns automatically. `identifier` is one spec applied
 to every resource type. The 26 specs replace the nine T-SQL scripts one for one (same tables, columns and semantics);
-`mapped_paths.txt` for `profile --unmapped` is generated from the specs.
+`mapped_paths.txt` for `profile --unmapped` stays a static file.
 
 ### 2. Flattener and workers (`src/npd_loader/flatten/engine.py`)
 
@@ -77,41 +78,41 @@ to every resource type. The 26 specs replace the nine T-SQL scripts one for one 
   as `raw_load.validate_line` today), hash the line (P2), flatten with its type's specs.
 - Rows go to one buffered writer per table; the stage file format is `bcp -c` with field terminator `0x1F` and row
   terminator `0x1E` (characters that do not occur in FHIR text, so no escaping and nothing lost; a value containing
-  either is rejected with the file and line). Every 500,000 rows or at end of file a buffer is handed to `bcp`.
+  either is rejected with the file and line). Files rotate every 500,000 rows; all are loaded once flattening ends.
 - A hash row per resource (`resource_type, resource_id, hash, last_updated`) goes to the staging hash table.
-- Duplicate `id`s within a file are detected in staging (unique index build), as today.
+- Duplicate `id`s within a release are detected in staging.
 
-### 3. Staging (`stage` schema in the npd database)
+### 3. Staging (`npd_stage` schema in the npd database)
 
-- Per run: `stage.<table>__r<run>` heaps created from the permanent tables' shape, plus `stage.resource_hash__r<run>`.
-- `bcp ... -h TABLOCK -b 500000` into empty heaps (minimally logged under SIMPLE recovery); several files of one table
-  load concurrently (BU locks are compatible).
-- After loading: per-type row counts checked against the rows the flattener emitted; unique index on
-  `(resource_type, resource_id)` for the hash table.
-- Names end in `__r<run>` so the existing orphan cleanup drops a killed run's staging.
+- Fixed tables, created by `init-db`: `npd_stage.<table>` for each of the 26 tables (same columns as the permanent
+  table, heap, no keys) and `npd_stage.resource_hash`. They are reused by every import.
+- Each import starts by truncating them (it holds the import lock, so only one import uses them at a time), then
+  `bcp ... -h TABLOCK -b 500000` loads the stage files into the empty heaps (minimally logged under SIMPLE recovery);
+  several files of one table load concurrently (BU locks are compatible).
+- After loading: per-table row counts checked against the rows the flattener emitted; duplicate `id`s found with one
+  grouped query on `npd_stage.resource_hash`.
+- A killed import needs no cleanup: the next import truncates staging first.
 
 ### 4. Delta and apply (`MssqlDialect.apply_delta`)
 
-`npd.resource_state (resource_type, resource_id, hash, last_updated, release_date, run_id)` holds the current version of
-every resource.
+`npd.resource_state (resource_type, resource_id, hash, last_updated, release_date, run_id, last_seen_release,
+last_seen_run_id)` holds the current version of every resource: `release_date`/`run_id` = when its content last
+changed, `last_seen_*` = the last release that contained it.
 
-1. Classify by joining `stage.resource_hash__r<run>` with `npd.resource_state`: **new** (not in state), **changed**
-   (hash differs), **unchanged**, **deleted** (in state, not in stage — only for resource types present in this
-   release, so a missing file never deletes a whole type).
-2. Safety check before applying: if `deleted` exceeds a configurable share of a type's rows (default 20%), fail the
-   run instead of applying (protects against a truncated CMS file).
-3. One transaction (`SET XACT_ABORT ON`, `LOCK_TIMEOUT` with the Phase 1 retry policy):
-   - `DELETE` the rows of changed and deleted resources from every permanent table of their type (and `identifier`);
-   - `INSERT … SELECT` the staging rows of new and changed resources into the permanent tables;
-   - update `npd.resource_state` (insert new, update changed, delete deleted); write `npd.release` (release, run,
-     counts).
-4. Drop the run's staging tables; update statistics on the touched tables (best effort).
+1. Classify by joining `npd_stage.resource_hash` with `npd.resource_state`: **new** (not in state), **changed** (hash
+   differs), **unchanged** (same hash). Resources in state but not in the release are **not seen**: counted, left as
+   they are.
+2. One transaction (`SET XACT_ABORT ON`, `LOCK_TIMEOUT` with the Phase 1 retry policy):
+   - for each permanent table: `DELETE` the rows of changed resources, then `INSERT … SELECT` the staging rows of new
+     and changed resources (an upsert per resource; child tables are replaced as a set because repeating elements
+     have no stable identity across releases);
+   - `MERGE` into `npd.resource_state`: insert new, update hash/content columns of changed, set `last_seen_*` for
+     every resource in the release;
+   - write `npd.release` (release, run, counts of new/changed/unchanged/not seen).
+3. Update statistics on the touched tables (best effort). Staging is left as is until the next import truncates it.
 
-First load: `resource_state` is empty, every resource is new, and step 3 is a plain bulk `INSERT … SELECT WITH
+First load: `resource_state` is empty, every resource is new, and step 2 is a plain bulk `INSERT … SELECT WITH
 (TABLOCK)` into empty tables.
-
-Child tables are replaced per resource (delete all its rows, insert the new set) rather than merged row by row:
-repeating elements have no stable identity across releases.
 
 ### 5. Readers
 
@@ -123,7 +124,8 @@ current version); they can stay as plain pass-through views for compatibility.
 
 - Permanent tables: drop partitioning; primary keys `(resource_id)` / `(resource_id, seq)` /
   `(resource_type, resource_id, seq)` for `identifier`; `release_date` stays as "release this row came from".
-- New: `npd.resource_state`, `npd.release` extended with counts (new/changed/unchanged/deleted).
+- New: `npd.resource_state`, `npd.release` extended with counts (new/changed/unchanged/not seen), and the fixed
+  `npd_stage` tables.
 - Migration from Phase 1 data: not needed — the first Phase 2 import is a first load into new tables (Phase 1 dev data
   can be dropped).
 
@@ -135,18 +137,21 @@ delta counts per type and rows per table. Catalog file tracking is unchanged.
 
 ## Error handling
 
-- Validation or flatten error in a file: the run fails naming the file and line; staging is dropped; nothing applied.
+- Validation or flatten error in a file: the run fails naming the file and line; nothing applied.
 - `bcp` failure: detected from its output and copied-row counts (never from the exit code alone — the spike showed
   `bcp` exits 0 when rows fail); the run fails.
 - Apply: one transaction; any error rolls back the whole delta.
-- Killed process: next run's orphan cleanup drops `__r<run>` staging; `fail_open_runs` closes the catalog run.
+- Killed process: the next import truncates staging; `fail_open_runs` closes the catalog run.
+- Partial or truncated CMS file: nothing is deleted, so the current data stays; the release's `not seen` count shows
+  the gap.
 
 ## Testing
 
 - Unit tests for every converter and for the flattener on the existing fixture release, asserting the same expected
   values as the Phase 1 transform tests (they become the golden tests for the specs).
 - Delta tests on SQL Server (`npd_test` scratch schemas): first load; second release with new, changed, unchanged and
-  deleted resources; the deletion safety check; a failure mid-apply leaves the previous state intact.
+  missing resources (missing ones stay, with their old `last_seen_release`); a failure mid-apply leaves the previous
+  state intact.
 - Acceptance: flatten the full 2026-09-29 release and compare table by table with the Phase 1 tables loaded in
   `npd_dev` (row counts and an `EXCEPT` both ways on keys and values), documenting any deliberate differences.
 - Performance: full first load and a second-release delta in `npd_dev`, recorded in `docs/profile/`.
