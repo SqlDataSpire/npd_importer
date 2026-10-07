@@ -31,6 +31,9 @@ class LocalStorage:
                 raise ValueError(f"unsafe storage path: {rel_path!r}")
         return self.root.joinpath(*posix.parts)
 
+    def local_path(self, rel: str) -> str:
+        return str(self._path(rel))
+
     def open_write(self, rel_path: str) -> BinaryIO:
         path = self._path(rel_path)
         path.parent.mkdir(parents=True, exist_ok=True)
