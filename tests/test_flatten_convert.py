@@ -40,3 +40,11 @@ def test_strip_id_and_ref_to():
     assert org(None) is None and org("Organization/") is None and org(7) is None
     with pytest.raises(ConvertError, match="Practitioner/Practitioner-1 is not a Organization reference"):
         org("Practitioner/Practitioner-1")
+
+
+def test_ref_to_versioned_and_contained_references():
+    org = ref_to("Organization")
+    assert org("Organization/Organization-1/_history/2") == "1"
+    assert org("#contained-1") is None
+    with pytest.raises(ConvertError, match="is not a Organization reference"):
+        org("Practitioner/Practitioner-1/_history/3")

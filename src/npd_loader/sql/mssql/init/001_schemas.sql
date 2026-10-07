@@ -45,7 +45,7 @@ IF OBJECT_ID(<<s:schema>> + N'.resource_state', N'U') IS NULL
     CREATE TABLE <<schema>>.resource_state (
         resource_key      int          IDENTITY(1, 1) NOT NULL CONSTRAINT pk_resource_state PRIMARY KEY CLUSTERED,
         resource_type_id  tinyint      NOT NULL,
-        resource_id       varchar(128) NOT NULL,   -- natural id without its 'Type-' prefix
+        resource_id       varchar(128) COLLATE Latin1_General_100_BIN2 NOT NULL,   -- natural id without its 'Type-' prefix
         hash              binary(20)   NULL,       -- SHA-1 of SPEC_VERSION + the ndjson line
         last_updated      datetime2(3) NULL,
         release_date      date         NULL,       -- release whose content is current
@@ -64,7 +64,7 @@ GO
 IF OBJECT_ID(<<s:stage_schema>> + N'.resource_hash', N'U') IS NULL
     CREATE TABLE <<stage_schema>>.resource_hash (
         resource_type  varchar(40)  NOT NULL,
-        resource_id    varchar(128) NOT NULL,
+        resource_id    varchar(128) COLLATE Latin1_General_100_BIN2 NOT NULL,
         hash           char(40)     NOT NULL,
         last_updated   datetime2(3) NULL,
         release_date   date         NOT NULL,

@@ -42,6 +42,10 @@ def test_first_load_inserts_everything(mssql_dialect, tmp_path):
     assert rows(d, f"SELECT practitioner_key FROM {d.q(sch, 'practitioner_role')} WHERE resource_key = ?", role) == [(prac,)]
     # identifiers are keyed by their resource
     assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'identifier')} WHERE resource_key = ?", prac)[0][0] >= 1
+    # a new resource's state row is complete from the insert
+    assert rows(d, f"SELECT CAST(CASE WHEN hash IS NOT NULL AND last_updated IS NOT NULL THEN 1 ELSE 0 END AS int), "
+                   f"release_date, run_id, last_seen_release, last_seen_run_id "
+                   f"FROM {d.q(sch, 'resource_state')} WHERE resource_key = ?", prac) == [(1, R1, 7, R1, 7)]
 
 
 def test_reference_to_missing_data_gets_a_key_without_state(mssql_dialect, tmp_path):
@@ -130,3 +134,16 @@ def test_failure_inside_apply_rolls_back(mssql_dialect, tmp_path):
     finally:
         with d._autocommit() as c:
             c.exec_driver_sql(f"EXEC sp_rename '{d.cfg.stage_schema}.practitioner_role_telecom_x', 'practitioner_role_telecom'")
+
+
+def test_ids_differing_only_by_case_are_distinct_resources(mssql_dialect, tmp_path):
+    d, sch = mssql_dialect, mssql_dialect.cfg.schema
+    records = copy.deepcopy(fixture_data.RECORDS)
+    for rid in ("Practitioner-abc", "Practitioner-ABC"):
+        rec = copy.deepcopy(records["06-Practitioner.ndjson"][1])
+        rec["id"] = rid
+        records["06-Practitioner.ndjson"].append(rec)
+    load(d, tmp_path, R1, 7, records)
+    assert key(d, "Practitioner", "abc") and key(d, "Practitioner", "ABC")
+    assert key(d, "Practitioner", "abc") != key(d, "Practitioner", "ABC")
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'practitioner')}") == [(4,)]

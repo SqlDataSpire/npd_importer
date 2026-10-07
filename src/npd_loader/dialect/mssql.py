@@ -67,8 +67,9 @@ class MssqlDialect:
 
     def _stage_select(self, t) -> str:
         """Select list that shapes a staging heap from its permanent table: text ids where the table has keys."""
-        text_ids = {"resource_id": "varchar(128)", "resource_type": "varchar(40)"} | {c: "varchar(128)" for c in ref_columns(t)}
-        return ", ".join(f"CAST(NULL AS {text_ids[c]}) AS {self.q(c)}" if c in text_ids else f"x.{self.q(c)}"
+        bin_id = "varchar(128)) COLLATE Latin1_General_100_BIN2"      # FHIR ids are case-sensitive
+        text_ids = {"resource_id": bin_id, "resource_type": "varchar(40))"} | {c: bin_id for c in ref_columns(t)}
+        return ", ".join(f"CAST(NULL AS {text_ids[c]} AS {self.q(c)}" if c in text_ids else f"x.{self.q(c)}"
                          for c in columns(t))
 
     def init_db(self) -> None:
@@ -173,6 +174,7 @@ class MssqlDialect:
             conn.exec_driver_sql(
                 f"SELECT t.resource_type_id, h.resource_type, h.resource_id, CONVERT(binary(20), h.hash, 2) AS hash, "
                 f"h.last_updated, CAST(st.resource_key AS int) AS resource_key, "
+                f"CAST(CASE WHEN st.resource_key IS NULL THEN 0 ELSE 1 END AS bit) AS known, "
                 f"CAST(CASE WHEN st.hash IS NULL THEN 'N' WHEN st.hash <> CONVERT(binary(20), h.hash, 2) THEN 'C' "
                 f"ELSE 'U' END AS char(1)) AS kind "
                 f"INTO {delta} FROM {hashes} h JOIN {types} t ON t.name = h.resource_type "
@@ -190,18 +192,27 @@ class MssqlDialect:
 
         def work(conn) -> tuple[dict[str, int], dict[str, int]]:
             # keys: first the resources of this release, then every id their rows reference
-            conn.exec_driver_sql(f"INSERT INTO {state} (resource_type_id, resource_id) "
-                                 f"SELECT resource_type_id, resource_id FROM {delta} WHERE resource_key IS NULL")
+            conn.exec_driver_sql(
+                f"INSERT INTO {state} (resource_type_id, resource_id, hash, last_updated, release_date, run_id, "
+                f"last_seen_release, last_seen_run_id) SELECT resource_type_id, resource_id, hash, last_updated, ?, ?, ?, ? "
+                f"FROM {delta} WHERE resource_key IS NULL", (release, run_id, release, run_id))
             conn.exec_driver_sql(f"UPDATE d SET resource_key = st.resource_key FROM {delta} d JOIN {state} st "
                                  f"ON st.resource_type_id = d.resource_type_id AND st.resource_id = d.resource_id "
                                  f"WHERE d.resource_key IS NULL")
             conn.exec_driver_sql(f"CREATE UNIQUE INDEX ux_delta_key ON {delta} (resource_key) INCLUDE (kind)")
+            def match_of(rtype):
+                return ("d.resource_type = x.resource_type" if rtype is None
+                        else f"d.resource_type_id = {type_ids[rtype]}")
             for t in ALL_TABLES:
+                match = match_of(TABLE_TYPES[t.name])
                 for col, target in ref_columns(t).items():
                     c = self.q(col)
                     conn.exec_driver_sql(
                         f"INSERT INTO {state} (resource_type_id, resource_id) SELECT DISTINCT {type_ids[target]}, x.{c} "
-                        f"FROM {self.q(s, t.name)} x WHERE x.{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {state} st "
+                        f"FROM {self.q(s, t.name)} x WHERE x.{c} IS NOT NULL "
+                        f"AND EXISTS (SELECT 1 FROM {delta} d WHERE d.resource_id = x.resource_id AND {match} "
+                        f"AND d.kind IN ('N', 'C')) "
+                        f"AND NOT EXISTS (SELECT 1 FROM {state} st "
                         f"WHERE st.resource_type_id = {type_ids[target]} AND st.resource_id = x.{c})")
             inserted, replaced = {}, {}
             for t in ALL_TABLES:
@@ -221,8 +232,7 @@ class MssqlDialect:
                                      f"AND {a}.resource_id = x.{self.q(name)}")
                     else:
                         select.append(f"x.{self.q(name)}")
-                match = ("d.resource_type = x.resource_type" if rtype is None
-                         else f"d.resource_type_id = {type_ids[rtype]}")
+                match = match_of(rtype)
                 inserted[t.name] = conn.exec_driver_sql(
                     f"INSERT INTO {target} WITH (TABLOCK) ({', '.join(self.q(c) for c in key_columns(t))}) "
                     f"SELECT {', '.join(select)} FROM {staged} x JOIN {delta} d ON d.resource_id = x.resource_id "
@@ -234,7 +244,7 @@ class MssqlDialect:
                 f"release_date = CASE WHEN d.kind = 'U' THEN st.release_date ELSE CAST(? AS date) END, "
                 f"run_id = CASE WHEN d.kind = 'U' THEN st.run_id ELSE ? END, "
                 f"last_seen_release = ?, last_seen_run_id = ? "
-                f"FROM {state} st JOIN {delta} d ON d.resource_key = st.resource_key",
+                f"FROM {state} st JOIN {delta} d ON d.resource_key = st.resource_key WHERE d.known = 1",
                 (release, run_id, release, run_id))
             totals = {k: sum(v[k] for v in kinds.values()) for k in ("new", "changed", "unchanged", "not_seen")}
             conn.exec_driver_sql(

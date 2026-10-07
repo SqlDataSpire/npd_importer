@@ -87,3 +87,14 @@ def test_init_db_recreates_a_staging_table_whose_columns_changed(mssql_dialect):
     with d.engine.connect() as conn:
         assert d._columns_of(conn, stage, "practitioner") == columns(practitioner)
         assert d._columns_of(conn, stage, "resource_hash") == list(HASH_COLUMNS)
+
+
+def test_ids_use_binary_collation(mssql_dialect):
+    d = mssql_dialect
+    sql = ("SELECT collation_name FROM sys.columns WHERE object_id = OBJECT_ID(?) AND name = ?")
+    bin2 = "Latin1_General_100_BIN2"
+    assert scalar(d, sql, f"{d.cfg.schema}.resource_state", "resource_id") == bin2
+    assert scalar(d, sql, f"{d.cfg.stage_schema}.resource_hash", "resource_id") == bin2
+    for t in ALL_TABLES:
+        for c in ["resource_id", *ref_columns(t)]:
+            assert scalar(d, sql, f"{d.cfg.stage_schema}.{t.name}", c) == bin2, (t.name, c)

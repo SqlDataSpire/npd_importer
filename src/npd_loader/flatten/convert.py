@@ -72,8 +72,9 @@ def ref_to(target: str):
     """Converter for a reference to a `target` resource: 'Organization/Organization-1' -> '1'. A reference naming
     another resource type is an error: the column holds keys of `target` only."""
     def conv(v: Any) -> str | None:
-        if not isinstance(v, str):
+        if not isinstance(v, str) or v.startswith("#"):        # contained reference: no target resource
             return None
+        v = re.sub(r"/_history/[^/]*$", "", v)                 # versioned reference: drop the version
         rtype, _, rid = v.rpartition("/")
         if rtype and rtype.rsplit("/", 1)[-1] != target:
             raise ConvertError(f"{v} is not a {target} reference")
