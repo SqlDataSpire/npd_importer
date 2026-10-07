@@ -166,3 +166,45 @@ delta counts per type and rows per table. Catalog file tracking is unchanged.
 
 Filegroups (later, per user), MongoDB (considered; SQL Server stays the target), parallel T-SQL transforms (replaced),
 a Postgres Phase 2 path (P3).
+
+## Revision 2026-10-07: surrogate integer keys (user decision)
+
+Measured on release 2026-09-29 (`npd_proof`): text keys like `Practitioner-1003000100` and
+`PractitionerRole-000008e4-…` cost ~9 GB raw across ~190M rows (~3.3 GB of it the constant type prefix), are copied
+into every nonclustered index, and make every join a collation-aware string comparison. NPI cannot key Organization
+(67,787 NPIs are shared by an NPI-keyed and a GUID-keyed Organization resource). Decision: surrogate `int` keys
+everywhere; indexes on natural keys (NPI, GUID ids) are Phase 3 refinements.
+
+### Keys
+
+- `npd.resource_type (resource_type_id tinyint PK, name varchar(40) UNIQUE)` — the 8 FHIR types (+ any type seen only
+  in identifiers is not needed: identifiers belong to their resource).
+- `npd.resource_state` becomes the key registry: `resource_key int IDENTITY` (clustered PK), `resource_type_id tinyint`,
+  `resource_id varchar(128)` = the id **without** its `Type-` prefix, `hash binary(20)` (SHA-1, NULL for placeholders),
+  `last_updated`, `release_date`, `run_id`, `last_seen_release`, `last_seen_run_id` (NULL for placeholders),
+  `is_placeholder bit`; unique index `(resource_type_id, resource_id)` (needed to assign and look up keys — not
+  deferrable). A resource keeps its key forever; keys are never reused.
+- Every data table: `resource_id` → `resource_key int NOT NULL`; primary keys `(resource_key)` / `(resource_key, seq)`;
+  `identifier` → `(resource_key, seq)` and its `resource_type` column is dropped (the key implies it).
+- Every reference column `<name>_id` (practitioner, organization, location, endpoint, issuer/part-of/managing/
+  provided-by/owned-by/administered-by/participating/network organization) → `<name>_key int` referencing
+  `resource_state.resource_key` (no FK constraint; loader-maintained).
+
+### Unresolved references: placeholders (proposed default — confirm in review)
+
+A reference whose target was never seen gets a `resource_state` row with `is_placeholder = 1` (key assigned, no hash,
+no data rows). When the real resource later arrives it takes over that key (`is_placeholder = 0`). Reference columns
+are therefore never NULL for a present reference, and orphans are `WHERE is_placeholder = 1`. (Release 2026-09-29 has
+0 unresolved references.)
+
+### Pipeline changes
+
+- Python is unchanged in role: staging keeps the natural text ids as flattened (staging is temporary), with the
+  `Type-` prefix stripped by the flattener. Each spec reference column declares its target type.
+- Staging tables are shaped by the specs (text ids); permanent tables by the key schema; `init-db` builds both.
+- `apply_delta`, inside its one transaction: classify by `(resource_type_id, resource_id)` against `resource_state`
+  (a placeholder counts as **new**); insert keys for new resources; insert placeholders for unresolved references;
+  replace rows of changed resources by `resource_key`; insert rows translating every text id to its key by join;
+  update `resource_state` (hash, last_seen, placeholder flag); write `npd.release`.
+- Phase 3 (refinements, out of scope now): indexes on natural keys — NPI, GUID ids, `identifier(system, value)` — and
+  views exposing natural ids for readers.
