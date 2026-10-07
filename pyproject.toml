@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "npd-loader"
 version = "0.1.0"
-description = "Load the CMS National Provider Directory FHIR bulk release into Postgres"
+description = "Load the CMS National Provider Directory FHIR bulk release into SQL Server"
 requires-python = ">=3.12"
 dependencies = [
     "Python-DataEngine>=2.4",
@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=8", "testcontainers[postgres]>=4"]
+test = ["pytest>=8"]
 
 [project.scripts]
 npd-loader = "npd_loader.cli:main"
@@ -24,7 +24,7 @@ npd-loader = "npd_loader.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-npd_loader = ["sql/*/init/*.sql", "sql/*/transform/*.sql", "sql/mapped_paths.txt"]
+npd_loader = ["sql/*/init/*.sql", "sql/mapped_paths.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

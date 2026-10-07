@@ -1,8 +1,7 @@
-"""Engine-neutral SQL text helpers: token rendering, GO batches, standalone table names, packaged scripts."""
+"""Engine-neutral SQL text helpers: token rendering, GO batches, packaged scripts."""
 from __future__ import annotations
 
 import re
-from datetime import date
 from importlib import resources
 from typing import Mapping
 
@@ -21,13 +20,6 @@ def render(text: str, tokens: Mapping[str, str]) -> str:
 
 def split_batches(text: str) -> list[str]:
     return [b.strip() for b in GO_RE.split(text) if b.strip()]
-
-
-def standalone_name(table: str, release: date, run_id: int, max_len: int) -> str:
-    name = f"{table}__{release:%Y%m%d}__r{run_id}"
-    if len(name) > max_len:
-        raise ValueError(f"table name {name!r} is longer than {max_len} characters")
-    return name
 
 
 def sql_scripts(flavor: str, kind: str) -> list[tuple[str, str]]:

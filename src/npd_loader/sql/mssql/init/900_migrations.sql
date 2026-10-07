@@ -7,8 +7,7 @@
 --       ALTER TABLE <<schema>>.practitioner ADD new_column nvarchar(1000) NULL
 --   GO
 --
--- Columns added to a partitioned parent apply to every partition. Standalone tables are created from the parent,
--- so they get new columns too. init-db recreates the v_* views afterwards.
+-- init-db recreates the v_* views afterwards.
 --
 IF COL_LENGTH(<<s:schema>> + N'.release', N'new_resources') IS NULL
     ALTER TABLE <<schema>>.release ADD new_resources int NULL, changed_resources int NULL,

@@ -1,3 +1,5 @@
+# NOT RUNNABLE ON THIS BRANCH: needs the Phase 1 code (raw load + T-SQL transforms, tests/mssql_fixture_load.py) as of
+# commit 9cef6c6; kept for the record of how tests/golden/fixture_tables.json was generated.
 """One-off: run the Phase 1 T-SQL path on the fixture release in an npd_test scratch schema and save every table's
 rows (normalized) to tests/golden/fixture_tables.json. Usage: python tests/make_golden.py (NPD_TEST_MSSQL_DB set)."""
 import json

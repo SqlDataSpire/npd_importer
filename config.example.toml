@@ -12,10 +12,10 @@ root = 'D:\npd'
 env_file = 'C:\npd-loader\database.prd.env'
 
 [npd_db]
-connection = "data"           # its type (mssql|postgres) selects the flavor
-stage_schema = "npd_stage"
+connection = "data"           # must be a type "mssql" connection (SQL Server only)
+stage_schema = "npd_stage"    # fixed staging tables, truncated at the start of each import
 schema = "npd"
-lock_timeout_seconds = 30     # publish/retention give up waiting for a table lock after this (3 attempts)
+lock_timeout_seconds = 30     # the delta apply gives up waiting for a table lock after this (3 attempts)
 
 [catalog]
 connection = "catalog"
@@ -31,6 +31,6 @@ backoff_seconds = 5
 timeout_seconds = 60
 
 [retention]
-# One published release; the server has limited space. During an import the new release coexists with the old one
-# until publish, so plan for ~2 copies at peak.
+# Extracted .ndjson files of the newest N releases are kept; older ones are deleted. The .ndjson.zst originals are
+# always kept (they are the backup). The data itself is one current dataset.
 keep_releases = 1

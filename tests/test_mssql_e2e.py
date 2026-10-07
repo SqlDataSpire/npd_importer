@@ -21,10 +21,10 @@ def publish(cms, week: int) -> date:
 
 
 def test_releases_end_to_end_on_sql_server(tmp_path, cms, mssql_doc, mssql_engine, mssql_schemas, capsys):
-    raw, data, cat = mssql_schemas("raw", "", "cat")
+    stage, data, cat = mssql_schemas("stage", "", "cat")
     cat_cfg = make_catalog_schema(mssql_engine, cat)
     env = write_env_file(tmp_path / "database.env", {"data": mssql_doc, "catalog": mssql_doc})
-    cfg_data = config_data(tmp_path / "data", cms.manifest_url, env_file=env, schemas=(raw, data),
+    cfg_data = config_data(tmp_path / "data", cms.manifest_url, env_file=env, schemas=(stage, data),
                            catalog_tables=(cat_cfg.run_table, cat_cfg.file_table), keep_releases=2)
     config_path = tmp_path / "config.toml"
     config_path.write_text(to_toml(cfg_data))
@@ -45,15 +45,19 @@ def test_releases_end_to_end_on_sql_server(tmp_path, cms, mssql_doc, mssql_engin
     assert scalar(f"SELECT count(*) FROM [{data}].[v_practitioner]") == 2
     assert len(catalog.get_data_files(r1, "ndjson")) == 8
     assert cli("run") == 0                                   # nothing to do
-    assert cli("import", "--force") == 0                     # replaces the partitions
-    assert scalar(f"SELECT count(*) FROM [{raw}].[resource]") == 12
+    assert cli("import", "--force") == 0                     # reapplies the release: nothing changes
+    assert scalar(f"SELECT count(*) FROM [{data}].[v_practitioner]") == 2
 
     r2 = publish(cms, 1)
     assert cli("run") == 0
     r3 = publish(cms, 2)
-    assert cli("run") == 0                                   # keep_releases = 2: r1 is dropped
-    assert scalar(f"SELECT count(DISTINCT release_date) FROM [{raw}].[resource]") == 2
-    assert scalar(f"SELECT MIN(release_date) FROM [{data}].[release]") == r2
+    assert cli("run") == 0                                   # keep_releases = 2: r1's .ndjson files are deleted
+    assert scalar(f"SELECT MIN(release_date) FROM [{data}].[release]") == r1
+    assert scalar(f"SELECT MAX(release_date) FROM [{data}].[release]") == r3
+    assert scalar(f"SELECT count(*) FROM [{data}].[v_organization] WHERE name = 'ORG {r3}'") == 1
+    assert all(not row.file_rel_path or not (tmp_path / "data" / row.file_rel_path).exists()
+               for row in catalog.get_data_files(r1, "ndjson"))
+    assert any((tmp_path / "data" / row.file_rel_path).exists() for row in catalog.get_data_files(r2, "ndjson"))
     capsys.readouterr()
     assert cli("status") == 0
     out = capsys.readouterr().out

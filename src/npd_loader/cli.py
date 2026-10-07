@@ -25,7 +25,7 @@ DEFAULT_CONFIG = "/etc/npd-loader/config.toml"
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="npd-loader", description="Load the CMS NPD FHIR release into SQL Server or Postgres")
+    parser = argparse.ArgumentParser(prog="npd-loader", description="Load the CMS NPD FHIR release into SQL Server")
     parser.add_argument("--config", default=os.environ.get("NPD_LOADER_CONFIG", DEFAULT_CONFIG))
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)

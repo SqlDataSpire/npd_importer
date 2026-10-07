@@ -1,5 +1,5 @@
 -- Phase 2: one current dataset, no partitioning. Every table: release_date (release the row came from), resource_id, ndjson_file_id, zst_file_id first; child tables add seq (1-based
--- position in the repeating element). Same columns as sql/postgres/init/003_tables.sql.
+-- position in the repeating element).
 
 IF OBJECT_ID(<<s:schema>> + N'.practitioner', N'U') IS NULL
     CREATE TABLE <<schema>>.practitioner (
