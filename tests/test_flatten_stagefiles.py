@@ -28,9 +28,9 @@ def test_flatten_file_writes_rows_and_hashes(tmp_path):
     chunks = [f for f in res.files if f.table == "practitioner_name"]
     assert [f.rows for f in chunks] == [2, 1]                       # rotates every chunk_rows rows
     h = read_rows([f for f in res.files if f.table == "resource_hash"][0].path)[0]
-    assert h[0] == "Practitioner" and len(h[2]) == 40 and h[4] == "2026-09-29" and h[6] == "1"
+    assert h[0] == "Practitioner" and h[1] == "1003000100" and len(h[2]) == 40 and h[4] == "2026-09-29" and h[6] == "1"
     p = read_rows([f for f in res.files if f.table == "practitioner"][0].path)[0]
-    assert p[1] == "Practitioner-1003000100" and p[6] == "1" and p[10] == ""   # active=1, prefix NULL -> empty
+    assert p[1] == "1003000100" and p[6] == "1" and p[10] == ""   # active=1, prefix NULL -> empty
 
 
 def test_bad_input_names_file_and_line(tmp_path):

@@ -61,7 +61,21 @@ def join(v: Any, sep: str = " ", skip: int = 0) -> str | None:
     return text or None
 
 
-def ref(v: Any) -> str | None:
-    if not isinstance(v, str):
-        return None
-    return v.rsplit("/", 1)[-1] or None
+def strip_id(rtype: str, rid: str) -> str:
+    """'Practitioner-1003000100' -> '1003000100'. Ids without their own type's prefix (or with nothing after it) are
+    kept whole."""
+    prefix = rtype + "-"
+    return rid[len(prefix):] if rid.startswith(prefix) and len(rid) > len(prefix) else rid
+
+
+def ref_to(target: str):
+    """Converter for a reference to a `target` resource: 'Organization/Organization-1' -> '1'. A reference naming
+    another resource type is an error: the column holds keys of `target` only."""
+    def conv(v: Any) -> str | None:
+        if not isinstance(v, str):
+            return None
+        rtype, _, rid = v.rpartition("/")
+        if rtype and rtype.rsplit("/", 1)[-1] != target:
+            raise ConvertError(f"{v} is not a {target} reference")
+        return strip_id(target, rid) if rid else None
+    return conv

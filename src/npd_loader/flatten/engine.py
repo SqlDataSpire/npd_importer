@@ -5,9 +5,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
 
+from npd_loader.flatten.convert import ref_to
+
 Getter = Callable[[Any], Any]
 _STEP = re.compile(r"([^.\[\]]+)|\[(\d+)\]")
 LINEAGE = ("release_date", "resource_id", "ndjson_file_id", "zst_file_id")
+KEY_LINEAGE = ("release_date", "resource_key", "ndjson_file_id", "zst_file_id")
 
 
 def path(expr: str) -> Getter:
@@ -30,6 +33,7 @@ class Col:
     source: str                      # "r" (resource) or "e" (repeating element)
     get: Getter
     conv: Callable[[Any], Any] | None = None
+    target: str | None = None        # reference column: the resource type it points to
 
     def value(self, res: Any, el: Any) -> Any:
         v = self.get(res if self.source == "r" else el)
@@ -40,12 +44,12 @@ def _getter(get: str | Getter) -> Getter:
     return path(get) if isinstance(get, str) else get
 
 
-def R(get: str | Getter, conv: Callable[[Any], Any] | None = None) -> Col:
-    return Col("r", _getter(get), conv)
+def R(get: str | Getter, conv: Callable[[Any], Any] | None = None, *, target: str | None = None) -> Col:
+    return Col("r", _getter(get), ref_to(target) if target else conv, target)
 
 
-def E(get: str | Getter, conv: Callable[[Any], Any] | None = None) -> Col:
-    return Col("e", _getter(get), conv)
+def E(get: str | Getter, conv: Callable[[Any], Any] | None = None, *, target: str | None = None) -> Col:
+    return Col("e", _getter(get), ref_to(target) if target else conv, target)
 
 
 def ext(url: str, inner: Getter | None = None) -> Getter:
@@ -84,9 +88,26 @@ class Table:
     each: str | None = None
     with_type: bool = False
 
+    def __post_init__(self):
+        for name, col in self.cols.items():
+            if col.target and not name.endswith("_id"):
+                raise ValueError(f"{self.name}.{name}: a reference column's name must end in _id")
+
 
 def columns(t: Table) -> list[str]:
     return list(LINEAGE) + (["resource_type"] if t.with_type else []) + (["seq"] if t.each else []) + list(t.cols)
+
+
+def ref_columns(t: Table) -> dict[str, str]:
+    """Staging reference columns (text ids) -> the resource type they point to."""
+    return {name: c.target for name, c in t.cols.items() if c.target}
+
+
+def key_columns(t: Table) -> list[str]:
+    """Permanent table columns: resource_key for resource_id, <name>_key for each reference column <name>_id, no
+    resource_type (the key implies it)."""
+    return (list(KEY_LINEAGE) + (["seq"] if t.each else [])
+            + [name[:-3] + "_key" if c.target else name for name, c in t.cols.items()])
 
 
 def flatten_resource(res: dict, tables: list[Table], lineage: tuple) -> Iterator[tuple[str, tuple]]:

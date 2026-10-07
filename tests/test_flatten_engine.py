@@ -1,5 +1,8 @@
-from npd_loader.flatten.convert import join, ref
-from npd_loader.flatten.engine import (E, R, Table, columns, ext, flatten_resource, identifier, official_name, path)
+import pytest
+
+from npd_loader.flatten.convert import join, ref_to
+from npd_loader.flatten.engine import (E, R, Table, columns, ext, flatten_resource, identifier, key_columns, official_name, path,
+                                        ref_columns)
 
 RES = {"resourceType": "Practitioner", "id": "P1", "meta": {"lastUpdated": "2026-09-29T04:34:00Z"},
        "extension": [{"url": "a", "valueBoolean": True}, {"url": "n", "extension": [{"url": "x", "valueCode": "y"}]}],
@@ -35,4 +38,20 @@ def test_flatten_resource():
                          ("p_telecom", LIN + (3, None, "2"))]
     assert ("p_alias", LIN + (2, "two")) in rows
     assert ("ident", LIN + ("Practitioner", 1, "1")) in rows
-    assert ref(path("x")({"x": "Org/O-1"})) == "O-1"
+    assert ref_to("Org")(path("x")({"x": "Org/Org-1"})) == "1"
+
+
+def test_reference_columns_and_key_columns():
+    t = Table("p_role", {"active": R("active"), "practitioner_id": R("practitioner.reference", target="Practitioner"),
+                         "endpoint_id": E("reference", target="Endpoint")}, each="endpoint")
+    i = Table("ident", {"value": E("value")}, each="identifier", with_type=True)
+    assert ref_columns(t) == {"practitioner_id": "Practitioner", "endpoint_id": "Endpoint"}
+    assert columns(t) == ["release_date", "resource_id", "ndjson_file_id", "zst_file_id", "seq",
+                          "active", "practitioner_id", "endpoint_id"]
+    assert key_columns(t) == ["release_date", "resource_key", "ndjson_file_id", "zst_file_id", "seq",
+                              "active", "practitioner_key", "endpoint_key"]
+    assert key_columns(i) == ["release_date", "resource_key", "ndjson_file_id", "zst_file_id", "seq", "value"]
+    res = {"practitioner": {"reference": "Practitioner/Practitioner-9"}, "endpoint": [{"reference": "Endpoint/Endpoint-e1"}]}
+    assert list(flatten_resource(res, [t], LIN)) == [("p_role", LIN + (1, None, "9", "e1"))]
+    with pytest.raises(ValueError, match="must end in _id"):
+        Table("bad", {"practitioner": R("practitioner.reference", target="Practitioner")})

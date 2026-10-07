@@ -1,6 +1,6 @@
 import pytest
 
-from npd_loader.flatten.convert import ConvertError, boolean, join, number, ref, ts
+from npd_loader.flatten.convert import ConvertError, boolean, join, number, ref_to, strip_id, ts
 
 
 def test_ts():
@@ -26,5 +26,17 @@ def test_boolean_number_join_ref():
     assert join(["A", "B", "C"]) == "A B C"
     assert join(["a", "b", "c"], ", ", 2) == "c"
     assert join([]) is None and join(None) is None and join(["a", None]) == "a"
-    assert ref("Organization/Organization-1") == "Organization-1"
-    assert ref("Organization-1") == "Organization-1" and ref(None) is None and ref("Organization/") is None
+
+
+def test_strip_id_and_ref_to():
+    assert strip_id("Practitioner", "Practitioner-1003000100") == "1003000100"
+    assert strip_id("Organization", "Organization-ea579d05-454e") == "ea579d05-454e"
+    assert strip_id("Organization", "1902099112") == "1902099112"            # no prefix: kept
+    assert strip_id("Organization", "Organization-") == "Organization-"      # nothing left: kept
+    assert strip_id("Location", "Organization-1") == "Organization-1"        # another type's prefix: kept
+    org = ref_to("Organization")
+    assert org("Organization/Organization-1336200294") == "1336200294"
+    assert org("Organization-1336200294") == "1336200294"                    # bare id
+    assert org(None) is None and org("Organization/") is None and org(7) is None
+    with pytest.raises(ConvertError, match="Practitioner/Practitioner-1 is not a Organization reference"):
+        org("Practitioner/Practitioner-1")

@@ -10,7 +10,7 @@ from datetime import date
 
 import orjson
 
-from npd_loader.flatten.convert import ConvertError, instant
+from npd_loader.flatten.convert import ConvertError, instant, strip_id
 from npd_loader.flatten.engine import flatten_resource
 from npd_loader.flatten.specs import SPEC_VERSION, tables_for
 from npd_loader.raw_load import NdjsonInput, RawLoadError, iter_lines
@@ -112,6 +112,7 @@ def flatten_file(inp: NdjsonInput, src_path: str, release: str, out_dir: str,
                 rid = res.get("id")
                 if not isinstance(rid, str) or not rid:
                     raise FlattenError(f"{inp.name}: line {number}: missing id", inp.file_id)
+                rid = strip_id(inp.resource_type, rid)
                 try:
                     for table, values in flatten_resource(res, tables, (release, rid, inp.file_id, inp.zst_file_id)):
                         writers[table].write(values)
