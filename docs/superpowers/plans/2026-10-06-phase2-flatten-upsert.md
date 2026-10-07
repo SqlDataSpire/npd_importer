@@ -2047,6 +2047,701 @@ git commit -m "test(phase2): two releases end to end through the CLI (first load
 
 ---
 
+## Surrogate integer keys (Tasks 13–15, executed before Task 12)
+
+Spec: section "Revision 2026-10-07: surrogate integer keys" and "References to missing data". Summary of the contract
+these three tasks share:
+
+- **Staging stays text-shaped** (`columns(t)`, unchanged names): `resource_id` and every reference column `<name>_id`
+  hold the natural id **without** its `Type-` prefix (`Practitioner-1003000100` → `1003000100`).
+- **Permanent tables are key-shaped** (`key_columns(t)`): `resource_id` → `resource_key int`, `<name>_id` →
+  `<name>_key int`, `identifier.resource_type` dropped.
+- `npd.resource_type(resource_type_id tinyint, name)` seeded with the 8 types; `npd.resource_state` is the key registry
+  (`resource_key int IDENTITY`). An id that has only been referenced has a row with `hash`, `last_updated`,
+  `release_date`, `run_id`, `last_seen_*` all NULL. No flag.
+- Reference columns declare their target type in the specs (`target="Organization"`); a reference naming a different
+  type is a `ConvertError` (the import fails loudly, naming file and line).
+
+Between Task 14 and Task 15 the delta/import/e2e SQL Server tests fail (schema is key-shaped, `apply_delta` not yet) —
+Task 14 runs only the flatten and schema tests (same pattern as ruling R1).
+
+### Task 13: Ids without the type prefix; reference columns declare their target type
+
+**Files:**
+- Modify: `src/npd_loader/flatten/convert.py` (replace `ref` with `strip_id` + `ref_to`)
+- Modify: `src/npd_loader/flatten/engine.py` (`Col.target`, `R/E(..., target=)`, `key_columns`, `ref_columns`)
+- Modify: `src/npd_loader/flatten/specs.py` (every reference column gets `target=`)
+- Modify: `src/npd_loader/flatten/stagefiles.py` (strip the resource id)
+- Test: `tests/test_flatten_convert.py`, `tests/test_flatten_engine.py`, `tests/test_flatten_specs.py`,
+  `tests/test_flatten_stagefiles.py`
+
+**Interfaces:**
+- Produces: `convert.strip_id(rtype: str, rid: str) -> str`; `convert.ref_to(target: str) -> Callable[[Any], str | None]`;
+  `engine.Col.target: str | None`; `engine.R(get, conv=None, *, target=None)`, `engine.E(...)` likewise;
+  `engine.KEY_LINEAGE = ("release_date", "resource_key", "ndjson_file_id", "zst_file_id")`;
+  `engine.key_columns(t: Table) -> list[str]`; `engine.ref_columns(t: Table) -> dict[str, str]` (staging column →
+  target type, spec order). `columns(t)` is unchanged.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `tests/test_flatten_convert.py`, change the import line to import `ref_to, strip_id` instead of `ref`, replace the
+two `ref(...)` asserts in `test_boolean_number_join_ref` with nothing, and add:
+
+```python
+def test_strip_id_and_ref_to():
+    assert strip_id("Practitioner", "Practitioner-1003000100") == "1003000100"
+    assert strip_id("Organization", "Organization-ea579d05-454e") == "ea579d05-454e"
+    assert strip_id("Organization", "1902099112") == "1902099112"            # no prefix: kept
+    assert strip_id("Organization", "Organization-") == "Organization-"      # nothing left: kept
+    assert strip_id("Location", "Organization-1") == "Organization-1"        # another type's prefix: kept
+    org = ref_to("Organization")
+    assert org("Organization/Organization-1336200294") == "1336200294"
+    assert org("Organization-1336200294") == "1336200294"                    # bare id
+    assert org(None) is None and org("Organization/") is None and org(7) is None
+    with pytest.raises(ConvertError, match="Practitioner/Practitioner-1 is not a Organization reference"):
+        org("Practitioner/Practitioner-1")
+```
+
+In `tests/test_flatten_engine.py`, change `ref` in the imports to `ref_to`, replace the last assert of
+`test_path_and_helpers` (`assert ref(path("x")(...)) == "O-1"`) with
+`assert ref_to("Org")(path("x")({"x": "Org/Org-1"})) == "1"`, and add:
+
+```python
+def test_reference_columns_and_key_columns():
+    t = Table("p_role", {"active": R("active"), "practitioner_id": R("practitioner.reference", target="Practitioner"),
+                         "endpoint_id": E("reference", target="Endpoint")}, each="endpoint")
+    i = Table("ident", {"value": E("value")}, each="identifier", with_type=True)
+    assert ref_columns(t) == {"practitioner_id": "Practitioner", "endpoint_id": "Endpoint"}
+    assert columns(t) == ["release_date", "resource_id", "ndjson_file_id", "zst_file_id", "seq",
+                          "active", "practitioner_id", "endpoint_id"]
+    assert key_columns(t) == ["release_date", "resource_key", "ndjson_file_id", "zst_file_id", "seq",
+                              "active", "practitioner_key", "endpoint_key"]
+    assert key_columns(i) == ["release_date", "resource_key", "ndjson_file_id", "zst_file_id", "seq", "value"]
+    res = {"practitioner": {"reference": "Practitioner/Practitioner-9"}, "endpoint": [{"reference": "Endpoint/Endpoint-e1"}]}
+    assert list(flatten_resource(res, [t], LIN)) == [("p_role", LIN + (1, None, "9", "e1"))]
+    with pytest.raises(ValueError, match="must end in _id"):
+        Table("bad", {"practitioner": R("practitioner.reference", target="Practitioner")})
+```
+
+(add `import pytest` and `key_columns, ref_columns` to the engine imports if missing.)
+
+In `tests/test_flatten_specs.py`, replace `flatten_fixture` and `test_flattened_fixture_equals_phase1_output`, and add
+a coverage test:
+
+```python
+from npd_loader.flatten.convert import strip_id
+from npd_loader.flatten.engine import columns, flatten_resource, ref_columns
+
+
+def flatten_fixture() -> dict[str, list[list]]:
+    out: dict[str, list[list]] = {}
+    ndjson = build_release("2026-09-29").ndjson
+    for i, (name, data) in enumerate(sorted(ndjson.items())):
+        fid, zid = 500 + 2 * i, 501 + 2 * i
+        for line in data.splitlines():
+            if not line.strip():
+                continue
+            res = orjson.loads(line)
+            rid = strip_id(res["resourceType"], res["id"])
+            for table, values in flatten_resource(res, tables_for(res["resourceType"]),
+                                                  ("2026-09-29", rid, fid, zid)):
+                out.setdefault(table, []).append([normalize(v) for v in values])
+    return out
+
+
+def golden_without_prefixes(t, rows):
+    """The Phase 1 golden values keep 'Type-' prefixes; Phase 2 strips them from resource ids and references."""
+    cols = columns(t)
+    rid, refs = cols.index("resource_id"), {cols.index(c): target for c, target in ref_columns(t).items()}
+    out = []
+    for row in rows:
+        row = list(row)
+        rtype = row[cols.index("resource_type")] if t.with_type else TABLE_TYPES[t.name]
+        row[rid] = strip_id(rtype, row[rid])
+        for i, target in refs.items():
+            row[i] = None if row[i] is None else strip_id(target, row[i])
+        out.append(row)
+    return sorted(out, key=lambda r: [x or "" for x in r])
+
+
+def test_flattened_fixture_equals_phase1_output():
+    golden, got = load_golden(), flatten_fixture()
+    for t in ALL_TABLES:
+        rows = sorted(got.get(t.name, []), key=lambda r: [x or "" for x in r])
+        assert rows == golden_without_prefixes(t, golden[t.name]), t.name
+
+
+def test_every_reference_column_has_a_target():
+    for t in ALL_TABLES:
+        for name, col in t.cols.items():
+            assert name.endswith("_id") == (col.target is not None), f"{t.name}.{name}"
+            assert col.target is None or col.target in SPECS, f"{t.name}.{name}"
+    assert sum(len(ref_columns(t)) for t in ALL_TABLES) == 18
+```
+
+In `tests/test_flatten_stagefiles.py` `test_flatten_file_writes_rows_and_hashes`, change the expected practitioner id:
+`assert h[1] == "1003000100"` (add to the `h` assert line) and `assert p[1] == "1003000100" and ...` (was
+`"Practitioner-1003000100"`).
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `.venv/Scripts/python -m pytest tests/test_flatten_convert.py tests/test_flatten_engine.py tests/test_flatten_specs.py tests/test_flatten_stagefiles.py -q`
+Expected: FAIL / collection errors (`strip_id`, `ref_to`, `key_columns`, `ref_columns` don't exist).
+
+- [ ] **Step 3: Implement**
+
+`src/npd_loader/flatten/convert.py` — replace `ref` with:
+
+```python
+def strip_id(rtype: str, rid: str) -> str:
+    """'Practitioner-1003000100' -> '1003000100'. Ids without their own type's prefix (or with nothing after it) are
+    kept whole."""
+    prefix = rtype + "-"
+    return rid[len(prefix):] if rid.startswith(prefix) and len(rid) > len(prefix) else rid
+
+
+def ref_to(target: str):
+    """Converter for a reference to a `target` resource: 'Organization/Organization-1' -> '1'. A reference naming
+    another resource type is an error: the column holds keys of `target` only."""
+    def conv(v: Any) -> str | None:
+        if not isinstance(v, str):
+            return None
+        rtype, _, rid = v.rpartition("/")
+        if rtype and rtype.rsplit("/", 1)[-1] != target:
+            raise ConvertError(f"{v} is not a {target} reference")
+        return strip_id(target, rid) if rid else None
+    return conv
+```
+
+`src/npd_loader/flatten/engine.py`:
+
+```python
+from npd_loader.flatten.convert import ref_to
+
+KEY_LINEAGE = ("release_date", "resource_key", "ndjson_file_id", "zst_file_id")
+
+
+@dataclass(frozen=True)
+class Col:
+    source: str                      # "r" (resource) or "e" (repeating element)
+    get: Getter
+    conv: Callable[[Any], Any] | None = None
+    target: str | None = None        # reference column: the resource type it points to
+
+    def value(self, res: Any, el: Any) -> Any:
+        v = self.get(res if self.source == "r" else el)
+        return self.conv(v) if self.conv else v
+
+
+def R(get: str | Getter, conv: Callable[[Any], Any] | None = None, *, target: str | None = None) -> Col:
+    return Col("r", _getter(get), ref_to(target) if target else conv, target)
+
+
+def E(get: str | Getter, conv: Callable[[Any], Any] | None = None, *, target: str | None = None) -> Col:
+    return Col("e", _getter(get), ref_to(target) if target else conv, target)
+```
+
+Add to `Table`:
+
+```python
+    def __post_init__(self):
+        for name, col in self.cols.items():
+            if col.target and not name.endswith("_id"):
+                raise ValueError(f"{self.name}.{name}: a reference column's name must end in _id")
+```
+
+and after `columns`:
+
+```python
+def ref_columns(t: Table) -> dict[str, str]:
+    """Staging reference columns (text ids) -> the resource type they point to."""
+    return {name: c.target for name, c in t.cols.items() if c.target}
+
+
+def key_columns(t: Table) -> list[str]:
+    """Permanent table columns: resource_key for resource_id, <name>_key for each reference column <name>_id, no
+    resource_type (the key implies it)."""
+    return (list(KEY_LINEAGE) + (["seq"] if t.each else [])
+            + [name[:-3] + "_key" if c.target else name for name, c in t.cols.items()])
+```
+
+`src/npd_loader/flatten/specs.py` — drop `ref` from the convert import, and declare targets (17 columns):
+
+```python
+NETWORK_REF = R(lambda r: path("valueReference.reference")(ext(NDH + "base-ext-network-reference")(r)),
+                target="Organization")
+
+
+def _ref_table(name: str, each: str, column: str, target: str) -> Table:
+    return Table(name, {column: E("reference", target=target)}, each=each)
+```
+
+Delete the unused `REF = {...}` constant. Then each reference column (18):
+
+| table | column | becomes |
+|---|---|---|
+| practitioner_qualification | issuer_organization_id | `E("issuer.reference", target="Organization")` |
+| organization | part_of_organization_id | `R("partOf.reference", target="Organization")` |
+| organization_endpoint | endpoint_id | `_ref_table("organization_endpoint", "endpoint", "endpoint_id", "Endpoint")` |
+| location | managing_organization_id | `R("managingOrganization.reference", target="Organization")` |
+| endpoint | managing_organization_id | `R("managingOrganization.reference", target="Organization")` |
+| practitioner_role | practitioner_id | `R("practitioner.reference", target="Practitioner")` |
+| practitioner_role | organization_id | `R("organization.reference", target="Organization")` |
+| practitioner_role | network_organization_id | `NETWORK_REF` |
+| practitioner_role_endpoint | endpoint_id | `_ref_table(..., "endpoint_id", "Endpoint")` |
+| practitioner_role_location | location_id | `_ref_table(..., "location_id", "Location")` |
+| organization_affiliation | organization_id | `R("organization.reference", target="Organization")` |
+| organization_affiliation | participating_organization_id | `R("participatingOrganization.reference", target="Organization")` |
+| organization_affiliation_network | network_organization_id | `_ref_table(..., "network_organization_id", "Organization")` |
+| healthcare_service | provided_by_organization_id | `R("providedBy.reference", target="Organization")` |
+| healthcare_service | network_organization_id | `NETWORK_REF` |
+| healthcare_service_location | location_id | `_ref_table(..., "location_id", "Location")` |
+| insurance_plan | owned_by_organization_id | `R("ownedBy.reference", target="Organization")` |
+| insurance_plan | administered_by_organization_id | `R("administeredBy.reference", target="Organization")` |
+
+`src/npd_loader/flatten/stagefiles.py` — in `flatten_file`, right after the `missing id` check:
+
+```python
+                rid = strip_id(inp.resource_type, rid)
+```
+
+(import `strip_id` from `npd_loader.flatten.convert`). The hash still covers the raw line, so it is unchanged.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `.venv/Scripts/python -m pytest tests/test_flatten_convert.py tests/test_flatten_engine.py tests/test_flatten_specs.py tests/test_flatten_stagefiles.py -q`
+Expected: PASS. `tests/test_flatten_specs.py::test_columns_match_the_phase1_tables` still passes (staging column names
+are unchanged).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/npd_loader/flatten tests/test_flatten_convert.py tests/test_flatten_engine.py tests/test_flatten_specs.py tests/test_flatten_stagefiles.py
+git commit -m "feat(phase2): strip type prefixes from ids; reference columns declare their target type"
+```
+
+### Task 14: Key schema: resource_type, resource_state key registry, key-shaped tables, text-shaped staging
+
+**Files:**
+- Modify: `src/npd_loader/sql/mssql/init/001_schemas.sql`
+- Modify: `src/npd_loader/sql/mssql/init/003_tables.sql` (via the one-off script below; not committed)
+- Modify: `src/npd_loader/sql/mssql/init/900_migrations.sql` (comment only)
+- Modify: `src/npd_loader/dialect/mssql.py` (`init_db` staging DDL)
+- Test: `tests/test_mssql_schema.py`
+
+**Interfaces:**
+- Consumes: `columns`, `key_columns`, `ref_columns` (Task 13).
+- Produces: tables `npd.resource_type`, `npd.resource_state` (key registry), 26 key-shaped permanent tables, 26
+  text-shaped staging heaps; `MssqlDialect._stage_select(t) -> str`.
+
+The schema has never been deployed with data (npd_dev and npd are empty; tests use scratch schemas), so the CREATE
+statements are edited in place rather than migrated. `001_schemas.sql` refuses to run over a pre-key `resource_state`.
+
+- [ ] **Step 1: Write the failing tests** — in `tests/test_mssql_schema.py`, change the import to
+`from npd_loader.flatten.engine import columns, key_columns` and in `test_tables_have_spec_columns_and_primary_keys`
+change `assert cols == columns(t), t.name` to `assert cols == key_columns(t), t.name` (staging keeps `columns(t)`).
+Replace the `for col in ("hash", ...)` loop with the block below and add two tests:
+
+```python
+    for col in ("resource_key", "resource_type_id", "resource_id", "hash", "release_date", "run_id",
+                "last_seen_release", "last_seen_run_id"):
+        assert scalar(d, "SELECT COL_LENGTH(?, ?)", f"{d.cfg.schema}.resource_state", col) is not None, col
+    assert scalar(d, "SELECT COL_LENGTH(?, 'resource_type')", f"{d.cfg.schema}.resource_state") is None
+    assert scalar(d, "SELECT COL_LENGTH(?, 'not_seen_resources')", f"{d.cfg.schema}.release") is not None
+
+
+def test_resource_types_are_seeded_and_keys_are_ints(mssql_dialect):
+    d = mssql_dialect
+    with d.engine.connect() as conn:
+        types = dict(conn.exec_driver_sql(f"SELECT name, resource_type_id FROM {d.q(d.cfg.schema, 'resource_type')}"))
+        assert set(types) == set(SPECS) and sorted(types.values()) == list(range(1, 9))
+        assert conn.exec_driver_sql(
+            "SELECT TYPE_NAME(system_type_id) + ':' + CAST(is_identity AS varchar(1)) FROM sys.columns "
+            "WHERE object_id = OBJECT_ID(?) AND name = 'resource_key'", (f"{d.cfg.schema}.resource_state",)).scalar() == "int:1"
+        assert conn.exec_driver_sql(
+            "SELECT TYPE_NAME(system_type_id) FROM sys.columns WHERE object_id = OBJECT_ID(?) AND name = 'hash'",
+            (f"{d.cfg.schema}.resource_state",)).scalar() == "binary"
+        assert conn.exec_driver_sql(
+            "SELECT count(*) FROM sys.indexes WHERE object_id = OBJECT_ID(?) AND is_unique = 1 AND is_primary_key = 0",
+            (f"{d.cfg.schema}.resource_state",)).scalar() == 1
+        for t in ALL_TABLES:                         # every *_key column is int; staging id columns are varchar
+            kinds = dict(conn.exec_driver_sql(
+                "SELECT name, TYPE_NAME(system_type_id) FROM sys.columns WHERE object_id = OBJECT_ID(?)",
+                (f"{d.cfg.schema}.{t.name}",)))
+            assert all(v == "int" for k, v in kinds.items() if k.endswith("_key")), t.name
+            stage = dict(conn.exec_driver_sql(
+                "SELECT name, TYPE_NAME(system_type_id) FROM sys.columns WHERE object_id = OBJECT_ID(?)",
+                (f"{d.cfg.stage_schema}.{t.name}",)))
+            assert stage["resource_id"] == "varchar" and all(stage[c] == "varchar" for c in ref_columns(t)), t.name
+
+
+def test_init_db_refuses_a_pre_key_resource_state(mssql_dialect):
+    d = mssql_dialect
+    st = d.q(d.cfg.schema, "resource_state")
+    with d.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql(f"DROP TABLE {st}")
+        conn.exec_driver_sql(f"CREATE TABLE {st} (resource_type varchar(40) NOT NULL, resource_id varchar(128) NOT NULL)")
+    with pytest.raises(Exception, match="predates surrogate keys"):
+        d.init_db()
+```
+
+(imports: `import pytest`, `from npd_loader.flatten.engine import columns, key_columns, ref_columns`,
+`from npd_loader.flatten.specs import ALL_TABLES, SPECS`.)
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `.venv/Scripts/python -m pytest tests/test_mssql_schema.py -q` (needs `NPD_TEST_MSSQL_DB`, see ledger)
+Expected: FAIL (permanent columns are `resource_id`; no `resource_type` table).
+
+- [ ] **Step 3: Rewrite the schema**
+
+`001_schemas.sql` — replace the `resource_state` block and its `resource_state_last_seen` index block with:
+
+```sql
+-- Refuse to run over the pre-key schema (text resource ids): drop and re-create that schema instead.
+IF COL_LENGTH(<<s:schema>> + N'.resource_state', N'resource_type') IS NOT NULL
+    THROW 50001, 'resource_state predates surrogate keys: drop the data schema and run init-db again', 1
+GO
+IF OBJECT_ID(<<s:schema>> + N'.resource_type', N'U') IS NULL
+    CREATE TABLE <<schema>>.resource_type (
+        resource_type_id tinyint     NOT NULL CONSTRAINT pk_resource_type PRIMARY KEY,
+        name             varchar(40) NOT NULL CONSTRAINT ux_resource_type_name UNIQUE
+    )
+GO
+INSERT INTO <<schema>>.resource_type (resource_type_id, name)
+SELECT v.id, v.name FROM (VALUES (1, 'Practitioner'), (2, 'Organization'), (3, 'Location'), (4, 'Endpoint'),
+    (5, 'PractitionerRole'), (6, 'OrganizationAffiliation'), (7, 'HealthcareService'), (8, 'InsurancePlan')) v (id, name)
+WHERE NOT EXISTS (SELECT 1 FROM <<schema>>.resource_type t WHERE t.resource_type_id = v.id)
+GO
+-- Key registry and current state of every resource. A key is assigned the first time an id is seen, as a resource or
+-- as a reference target, and never changes or gets reused. An id that has only been referenced has NULL hash,
+-- last_updated, release_date, run_id and last_seen_* (no data rows). Resources missing from a release are kept (aging
+-- data); last_seen_release is the last release that contained them.
+IF OBJECT_ID(<<s:schema>> + N'.resource_state', N'U') IS NULL
+    CREATE TABLE <<schema>>.resource_state (
+        resource_key      int          IDENTITY(1, 1) NOT NULL CONSTRAINT pk_resource_state PRIMARY KEY CLUSTERED,
+        resource_type_id  tinyint      NOT NULL,
+        resource_id       varchar(128) NOT NULL,   -- natural id without its 'Type-' prefix
+        hash              binary(20)   NULL,       -- SHA-1 of SPEC_VERSION + the ndjson line
+        last_updated      datetime2(3) NULL,
+        release_date      date         NULL,       -- release whose content is current
+        run_id            int          NULL,
+        last_seen_release date         NULL,
+        last_seen_run_id  int          NULL
+    ) WITH (DATA_COMPRESSION = PAGE)
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(<<s:schema>> + N'.resource_state') AND name = N'ux_resource_state_id')
+    CREATE UNIQUE INDEX ux_resource_state_id ON <<schema>>.resource_state (resource_type_id, resource_id) WITH (DATA_COMPRESSION = PAGE)
+GO
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(<<s:schema>> + N'.resource_state') AND name = N'resource_state_last_seen')
+    CREATE INDEX resource_state_last_seen ON <<schema>>.resource_state (last_seen_release) WITH (DATA_COMPRESSION = PAGE)
+GO
+```
+
+The `THROW` must come before anything else touches `resource_state`; keep it right after the `release` table block.
+The staging `resource_hash` block is unchanged (text id, `hash char(40)` hex).
+
+`003_tables.sql` — run this one-off script from the repo root (scratchpad file, not committed), then review the diff:
+
+```python
+import re, pathlib
+from npd_loader.flatten.specs import ALL_TABLES
+from npd_loader.flatten.engine import ref_columns
+p = pathlib.Path("src/npd_loader/sql/mssql/init/003_tables.sql")
+s = p.read_text(encoding="utf-8")
+refs = sorted({c for t in ALL_TABLES for c in ref_columns(t)})
+s = s.replace("resource_id varchar(128) NOT NULL", "resource_key int NOT NULL")
+s = s.replace("CLUSTERED (resource_type, resource_id, seq)", "CLUSTERED (resource_key, seq)")
+s = s.replace("CLUSTERED (resource_id", "CLUSTERED (resource_key")
+s = re.sub(r"\n\s*resource_type varchar\(128\) NOT NULL,", "", s)
+for c in refs:
+    s = re.sub(rf"\b{c} varchar\(128\)", f"{c[:-3]}_key int", s)
+    s = re.sub(rf"\(({c})\)", f"({c[:-3]}_key)", s)          # nonclustered indexes on reference columns
+s = s.replace("resource_id, ndjson_file_id, zst_file_id first", "resource_key, ndjson_file_id, zst_file_id first")
+p.write_text(s, encoding="utf-8")
+assert "resource_id" not in s and "_id varchar" not in s and "resource_type" not in s, "leftover text ids"
+```
+
+Expected diff: 26 `resource_key int NOT NULL`, 26 PKs on `resource_key`, 18 `<name>_key int`, the three reference
+indexes (`location_managing_organization`, `practitioner_role_practitioner`, `practitioner_role_organization`) on
+`_key` columns, identifier without `resource_type`. Index names stay.
+
+`900_migrations.sql` — add one line to the header comment: `-- 2026-10-07: surrogate keys were introduced by editing
+001/003 in place (nothing deployed yet); from now on follow the convention above.`
+
+`src/npd_loader/dialect/mssql.py` — import `ref_columns` from the engine, add:
+
+```python
+    def _stage_select(self, t) -> str:
+        """Select list that shapes a staging heap from its permanent table: text ids where the table has keys."""
+        text_ids = {"resource_id": "varchar(128)", "resource_type": "varchar(40)"} | {c: "varchar(128)" for c in ref_columns(t)}
+        return ", ".join(f"CAST(NULL AS {text_ids[c]}) AS {self.q(c)}" if c in text_ids else f"x.{self.q(c)}"
+                         for c in columns(t))
+```
+
+and in `init_db` replace the staging `SELECT TOP 0 {cols} INTO ... FROM {permanent}` with
+`f"SELECT TOP 0 {self._stage_select(t)} INTO {self.q(stage, t.name)} FROM {self.q(schema, t.name)} x"` (drop the
+now-unused `cols` variable). The resync check above it (`have != columns(t)`) stays as is.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `.venv/Scripts/python -m pytest tests/test_mssql_schema.py tests/test_flatten_*.py -q`
+Expected: PASS. (`test_mssql_delta/import/e2e/stage` fail until Task 15 — don't run them here.)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/npd_loader/sql/mssql/init src/npd_loader/dialect/mssql.py tests/test_mssql_schema.py
+git commit -m "feat(phase2): surrogate int keys: resource_type, key registry, key-shaped tables, text staging"
+```
+
+### Task 15: `apply_delta` assigns keys and translates text ids
+
+**Files:**
+- Modify: `src/npd_loader/dialect/mssql.py` (`apply_delta`)
+- Test: `tests/test_mssql_delta.py`, `tests/test_mssql_import.py`, `tests/test_mssql_e2e.py`
+- Modify: `README.md` (the `resource_state` paragraph near line 98: keys, referenced-only ids)
+
+**Interfaces:**
+- Consumes: `key_columns`, `ref_columns`, `TABLE_TYPES`, `ALL_TABLES`; schema from Task 14.
+- Produces: unchanged `DeltaResult(kinds, inserted, replaced)`; `kinds` per type name as before. `not_seen` counts only
+  resources with data (`hash IS NOT NULL`).
+
+- [ ] **Step 1: Write the failing tests** — rewrite `tests/test_mssql_delta.py` (keep `rows`, `load`, imports):
+
+```python
+def key(d, rtype, rid):
+    found = rows(d, f"SELECT s.resource_key FROM {d.q(d.cfg.schema, 'resource_state')} s JOIN "
+                    f"{d.q(d.cfg.schema, 'resource_type')} t ON t.resource_type_id = s.resource_type_id "
+                    f"WHERE t.name = ? AND s.resource_id = ?", rtype, rid)
+    return found[0][0] if found else None
+
+
+def test_first_load_inserts_everything(mssql_dialect, tmp_path):
+    d, sch = mssql_dialect, mssql_dialect.cfg.schema
+    res = load(d, tmp_path, R1, 7)
+    assert sum(k["new"] for k in res.kinds.values()) == 12
+    assert res.inserted["practitioner"] == 2 and res.replaced["practitioner"] == 0      # real rowcounts
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'resource_state')} WHERE hash IS NOT NULL") == [(12,)]
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'practitioner')}") == [(2,)]
+    assert rows(d, f"SELECT import_run_id, new_resources, not_seen_resources FROM {d.q(sch, 'release')}") == [(7, 12, 0)]
+    # references translate to the target's key
+    role, prac = key(d, "PractitionerRole", "0f00aa11"), key(d, "Practitioner", "1003000100")
+    assert role and prac
+    assert rows(d, f"SELECT practitioner_key FROM {d.q(sch, 'practitioner_role')} WHERE resource_key = ?", role) == [(prac,)]
+    # identifiers are keyed by their resource
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'identifier')} WHERE resource_key = ?", prac)[0][0] >= 1
+
+
+def test_reference_to_missing_data_gets_a_key_without_state(mssql_dialect, tmp_path):
+    d, sch = mssql_dialect, mssql_dialect.cfg.schema
+    load(d, tmp_path, R1, 7)
+    org = key(d, "Organization", "1295596195")              # HealthcareService.providedBy; no such Organization
+    assert org is not None
+    assert rows(d, f"SELECT hash, last_updated, release_date, run_id, last_seen_release, last_seen_run_id "
+                   f"FROM {d.q(sch, 'resource_state')} WHERE resource_key = ?", org) == [(None,) * 6]
+    assert rows(d, f"SELECT provided_by_organization_key FROM {d.q(sch, 'healthcare_service')}") == [(org,)]
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'organization')} WHERE resource_key = ?", org) == [(0,)]
+    # the data arrives in the next release: same key, counted as new, state filled in
+    records = copy.deepcopy(fixture_data.RECORDS)
+    late = copy.deepcopy(records["01-Organization.ndjson"][0])
+    late["id"] = "Organization-1295596195"
+    records["01-Organization.ndjson"].append(late)
+    res = load(d, tmp_path, R2, 8, records)
+    assert res.kinds["Organization"]["new"] == 1
+    assert key(d, "Organization", "1295596195") == org
+    assert rows(d, f"SELECT release_date, last_seen_release FROM {d.q(sch, 'resource_state')} WHERE resource_key = ?",
+                org) == [(R2, R2)]
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'organization')} WHERE resource_key = ?", org) == [(1,)]
+    assert rows(d, f"SELECT not_seen_resources FROM {d.q(sch, 'release')} WHERE release_date = ?", R2) == [(0,)]
+
+
+def test_second_release_upserts_and_keeps_aging_data(mssql_dialect, tmp_path):
+    d = mssql_dialect
+    load(d, tmp_path, R1, 7)
+    records = copy.deepcopy(fixture_data.RECORDS)
+    p = records["06-Practitioner.ndjson"][0]
+    p["name"][0]["family"] = "GOMEZ-CHANGED"
+    p["telecom"] = p["telecom"][:1]                                       # child rows shrink
+    missing = records["08-OrganizationAffiliation.ndjson"].pop()          # not in the new release
+    pkey = key(d, "Practitioner", p["id"].split("-", 1)[1])
+    mkey = key(d, "OrganizationAffiliation", missing["id"].split("-", 1)[1])
+    res = load(d, tmp_path, R2, 8, records)
+    assert res.kinds["Practitioner"] == {"new": 0, "changed": 1, "unchanged": 1, "not_seen": 0}
+    assert res.kinds["OrganizationAffiliation"]["not_seen"] == 1
+    assert res.inserted["practitioner"] == 1 and res.replaced["practitioner"] == 1
+    sch = d.cfg.schema
+    assert key(d, "Practitioner", p["id"].split("-", 1)[1]) == pkey                   # keys never change
+    assert rows(d, f"SELECT name_family FROM {d.q(sch, 'practitioner')} WHERE resource_key = ?", pkey) == [("GOMEZ-CHANGED",)]
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'practitioner_telecom')} WHERE resource_key = ?", pkey) == [(1,)]
+    # aging data stays live, with its last-seen release
+    assert rows(d, f"SELECT count(*) FROM {d.q(sch, 'organization_affiliation')} WHERE resource_key = ?", mkey) == [(1,)]
+    assert rows(d, f"SELECT last_seen_release FROM {d.q(sch, 'resource_state')} WHERE resource_key = ?", mkey) == [(R1,)]
+    # content release vs last seen
+    assert rows(d, f"SELECT release_date, last_seen_release FROM {d.q(sch, 'resource_state')} WHERE resource_key = ?",
+                pkey) == [(R2, R2)]
+    unchanged = key(d, "Practitioner", records["06-Practitioner.ndjson"][1]["id"].split("-", 1)[1])
+    assert rows(d, f"SELECT release_date, last_seen_release FROM {d.q(sch, 'resource_state')} WHERE resource_key = ?",
+                unchanged) == [(R1, R2)]
+    assert rows(d, f"SELECT not_seen_resources FROM {d.q(sch, 'release')} WHERE release_date = ?", R2) == [(1,)]
+```
+
+Keep `test_partial_file_deletes_nothing` as is. In `test_failure_inside_apply_rolls_back`: change
+`ORDER BY resource_id` to `ORDER BY resource_key`; add a new resource to `records` so the failed apply would have
+assigned keys (`records["06-Practitioner.ndjson"].append({**records["06-Practitioner.ndjson"][1], "id": "Practitioner-1999999999"})`);
+right before the `try:` record `before = rows(d, f"SELECT count(*), max(resource_key) FROM {d.q(d.cfg.schema, 'resource_state')}")`;
+and add after the release assert:
+`assert rows(d, f"SELECT count(*), max(resource_key) FROM {d.q(d.cfg.schema, 'resource_state')}") == before` (key
+assignment rolls back with everything else; IDENTITY values consumed by the rollback are simply skipped later).
+
+`tests/test_mssql_import.py` `test_killed_run_leftovers_are_never_applied_and_run_closed`: stage the stale row as
+`VALUES ('2026-01-01', 'STALE', 1, 2)` and replace the final count with
+
+```python
+        assert c.exec_driver_sql(f"SELECT count(*) FROM {d.q(d.cfg.schema, 'resource_state')} "
+                                 f"WHERE resource_id = 'STALE'").scalar() == 0      # never gets a key or a row
+```
+
+`tests/test_mssql_e2e.py` lines 40 and 43–44: compare by id through `resource_state`:
+
+```python
+    aging_id = aging["id"].split("-", 1)[1]
+    assert scalar(f"SELECT count(*) FROM [{data}].[organization_affiliation] a JOIN [{data}].[resource_state] s "
+                  f"ON s.resource_key = a.resource_key WHERE s.resource_id = '{aging_id}'") == 1
+    ...
+    assert scalar(f"SELECT CAST(last_seen_release AS varchar(10)) FROM [{data}].[resource_state] "
+                  f"WHERE resource_id = '{aging_id}'") == "2026-09-29"
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `.venv/Scripts/python -m pytest tests/test_mssql_delta.py -q`
+Expected: FAIL (apply_delta still references `resource_type`/text ids in the permanent tables).
+
+- [ ] **Step 3: Implement** — replace `apply_delta` in `src/npd_loader/dialect/mssql.py` (imports: add `key_columns`,
+`ref_columns` from `npd_loader.flatten.engine`):
+
+```python
+    def apply_delta(self, release: date, run_id: int) -> DeltaResult:
+        """Upsert the staged release: give every new id (resource or reference target) a key, replace the rows of
+        changed resources, insert new ones with text ids translated to keys, mark every resource of the release as
+        seen. Resources missing from the release are kept (aging data)."""
+        s, schema = self.cfg.stage_schema, self.cfg.schema
+        hashes, state = self.q(s, HASH_TABLE), self.q(schema, "resource_state")
+        types = self.q(schema, "resource_type")
+        delta = self.q(s, "delta")      # scratch table rebuilt per apply, not one of the fixed staging tables
+        # Classifying outside the transaction is safe: the import lock is held, so nothing else changes resource_state.
+        with self._autocommit() as conn:
+            type_ids = {n: i for n, i in conn.exec_driver_sql(f"SELECT name, resource_type_id FROM {types}")}
+            unknown = [r[0] for r in conn.exec_driver_sql(
+                f"SELECT DISTINCT resource_type FROM {hashes} h WHERE NOT EXISTS "
+                f"(SELECT 1 FROM {types} t WHERE t.name = h.resource_type)")]
+            if unknown:
+                raise ValueError(f"staged resource types missing from {schema}.resource_type: {unknown}")
+            conn.exec_driver_sql(f"DROP TABLE IF EXISTS {delta}")
+            conn.exec_driver_sql(
+                f"SELECT t.resource_type_id, h.resource_type, h.resource_id, CONVERT(binary(20), h.hash, 2) AS hash, "
+                f"h.last_updated, CAST(st.resource_key AS int) AS resource_key, "
+                f"CAST(CASE WHEN st.hash IS NULL THEN 'N' WHEN st.hash <> CONVERT(binary(20), h.hash, 2) THEN 'C' "
+                f"ELSE 'U' END AS char(1)) AS kind "
+                f"INTO {delta} FROM {hashes} h JOIN {types} t ON t.name = h.resource_type "
+                f"LEFT JOIN {state} st ON st.resource_type_id = t.resource_type_id AND st.resource_id = h.resource_id")
+            conn.exec_driver_sql(f"CREATE UNIQUE CLUSTERED INDEX ux_delta ON {delta} (resource_type_id, resource_id)")
+            kinds: dict[str, dict[str, int]] = {}
+            for rtype, kind, n in conn.exec_driver_sql(
+                    f"SELECT resource_type, kind, COUNT_BIG(*) FROM {delta} GROUP BY resource_type, kind"):
+                kinds.setdefault(rtype, {"new": 0, "changed": 0, "unchanged": 0, "not_seen": 0})[self.KINDS[kind]] = n
+            for rtype, n in conn.exec_driver_sql(
+                    f"SELECT t.name, COUNT_BIG(*) FROM {state} st JOIN {types} t ON t.resource_type_id = st.resource_type_id "
+                    f"WHERE st.hash IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {delta} d "
+                    f"WHERE d.resource_type_id = st.resource_type_id AND d.resource_id = st.resource_id) GROUP BY t.name"):
+                kinds.setdefault(rtype, {"new": 0, "changed": 0, "unchanged": 0, "not_seen": 0})["not_seen"] = n
+
+        def work(conn) -> tuple[dict[str, int], dict[str, int]]:
+            # keys: first the resources of this release, then every id their rows reference
+            conn.exec_driver_sql(f"INSERT INTO {state} (resource_type_id, resource_id) "
+                                 f"SELECT resource_type_id, resource_id FROM {delta} WHERE resource_key IS NULL")
+            conn.exec_driver_sql(f"UPDATE d SET resource_key = st.resource_key FROM {delta} d JOIN {state} st "
+                                 f"ON st.resource_type_id = d.resource_type_id AND st.resource_id = d.resource_id "
+                                 f"WHERE d.resource_key IS NULL")
+            conn.exec_driver_sql(f"CREATE UNIQUE INDEX ux_delta_key ON {delta} (resource_key) INCLUDE (kind)")
+            for t in ALL_TABLES:
+                for col, target in ref_columns(t).items():
+                    c = self.q(col)
+                    conn.exec_driver_sql(
+                        f"INSERT INTO {state} (resource_type_id, resource_id) SELECT DISTINCT {type_ids[target]}, x.{c} "
+                        f"FROM {self.q(s, t.name)} x WHERE x.{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {state} st "
+                        f"WHERE st.resource_type_id = {type_ids[target]} AND st.resource_id = x.{c})")
+            inserted, replaced = {}, {}
+            for t in ALL_TABLES:
+                target, staged = self.q(schema, t.name), self.q(s, t.name)
+                rtype = TABLE_TYPES[t.name]
+                replaced[t.name] = conn.exec_driver_sql(
+                    f"DELETE x FROM {target} x JOIN {delta} d ON d.resource_key = x.resource_key "
+                    f"WHERE d.kind = 'C'").rowcount
+                select, joins = ["x.release_date", "d.resource_key", "x.ndjson_file_id", "x.zst_file_id"], []
+                if t.each:
+                    select.append("x.seq")
+                for i, (name, col) in enumerate(t.cols.items()):
+                    if col.target:
+                        a = f"k{i}"
+                        select.append(f"{a}.resource_key")
+                        joins.append(f"LEFT JOIN {state} {a} ON {a}.resource_type_id = {type_ids[col.target]} "
+                                     f"AND {a}.resource_id = x.{self.q(name)}")
+                    else:
+                        select.append(f"x.{self.q(name)}")
+                match = ("d.resource_type = x.resource_type" if rtype is None
+                         else f"d.resource_type_id = {type_ids[rtype]}")
+                inserted[t.name] = conn.exec_driver_sql(
+                    f"INSERT INTO {target} WITH (TABLOCK) ({', '.join(self.q(c) for c in key_columns(t))}) "
+                    f"SELECT {', '.join(select)} FROM {staged} x JOIN {delta} d ON d.resource_id = x.resource_id "
+                    f"AND {match} AND d.kind IN ('N', 'C') {' '.join(joins)}").rowcount
+            conn.exec_driver_sql(
+                f"UPDATE st SET "
+                f"hash = CASE WHEN d.kind = 'U' THEN st.hash ELSE d.hash END, "
+                f"last_updated = CASE WHEN d.kind = 'U' THEN st.last_updated ELSE d.last_updated END, "
+                f"release_date = CASE WHEN d.kind = 'U' THEN st.release_date ELSE CAST(? AS date) END, "
+                f"run_id = CASE WHEN d.kind = 'U' THEN st.run_id ELSE ? END, "
+                f"last_seen_release = ?, last_seen_run_id = ? "
+                f"FROM {state} st JOIN {delta} d ON d.resource_key = st.resource_key",
+                (release, run_id, release, run_id))
+            totals = {k: sum(v[k] for v in kinds.values()) for k in ("new", "changed", "unchanged", "not_seen")}
+            conn.exec_driver_sql(
+                f"MERGE {self.q(schema, 'release')} AS t USING (SELECT CAST(? AS date) AS release_date) AS s "
+                f"ON t.release_date = s.release_date "
+                f"WHEN MATCHED THEN UPDATE SET import_run_id = ?, published_at = SYSUTCDATETIME(), new_resources = ?, "
+                f"changed_resources = ?, unchanged_resources = ?, not_seen_resources = ? "
+                f"WHEN NOT MATCHED THEN INSERT (release_date, import_run_id, new_resources, changed_resources, "
+                f"unchanged_resources, not_seen_resources) VALUES (s.release_date, ?, ?, ?, ?, ?);",
+                (release, run_id, totals["new"], totals["changed"], totals["unchanged"], totals["not_seen"],
+                 run_id, totals["new"], totals["changed"], totals["unchanged"], totals["not_seen"]))
+            return inserted, replaced
+```
+
+The rest of `apply_delta` (the `_locked_transaction` call, log line, return) is unchanged. In the `UPDATE STATISTICS` loop afterwards also update
+`resource_state` when anything was inserted (`if any(inserted.values()): ... UPDATE STATISTICS {state}` with the same
+best-effort try/except).
+
+Why `kind = 'U'` tests in the UPDATE: an `N` row may be a referenced-only id that already had a key; it must get its
+hash and content release like a changed one.
+
+README: in the paragraph that introduces `npd.resource_state`, say that it is the key registry (`resource_key`, `int`,
+assigned the first time an id is seen as a resource or as a reference, never reused); that data tables use
+`resource_key` and reference columns `<name>_key`; that ids are stored without their `Type-` prefix; and that a key
+whose `hash` is NULL is a referenced id with no data yet (find such references with a `LEFT JOIN`).
+
+- [ ] **Step 4: Run the SQL Server suite**
+
+Run: `.venv/Scripts/python -m pytest -q` (whole suite, `NPD_TEST_MSSQL_DB` set)
+Expected: all pass (≈155 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/npd_loader/dialect/mssql.py tests/test_mssql_delta.py tests/test_mssql_import.py tests/test_mssql_e2e.py README.md
+git commit -m "feat(phase2): apply_delta assigns surrogate keys and translates text ids by join"
+```
+
 ### Task 12: Acceptance against Phase 1 and performance in npd_dev (manual, with the user)
 
 **Files:**
@@ -2063,17 +2758,43 @@ for investigation), and `npd_dev` is a new empty database with SIMPLE recovery a
 `npd-loader --config config.local.toml import --release 2026-09-29 --force` (`--force` because dev run 7009 already
 recorded 2026-09-29 as imported; the .ndjson files are on `E:`). Record start/end per phase from the log (flatten, bcp,
 apply).
-- [ ] **Step 3: Compare with Phase 1** for each of the 26 tables (read-only):
+- [ ] **Step 3: Compare with Phase 1** for each of the 26 tables (read-only). Phase 2 stores keys, so the Phase 2
+side is rebuilt with text ids (`Type-` prefix put back) before `EXCEPT`. Generate the 26 queries with this scratch
+script (not committed) and run them with `sqlcmd -S cssnpi -E -i compare.sql`:
 
-```sql
--- per table T: counts and differences both ways (identical column lists)
-SELECT (SELECT COUNT_BIG(*) FROM npd_proof.npd.T WHERE release_date = '2026-09-29') AS phase1,
-       (SELECT COUNT_BIG(*) FROM npd_dev.npd.T) AS phase2,
-       (SELECT COUNT_BIG(*) FROM (SELECT * FROM npd_proof.npd.T WHERE release_date = '2026-09-29'
-                                  EXCEPT SELECT * FROM npd_dev.npd.T) x) AS only_phase1,
-       (SELECT COUNT_BIG(*) FROM (SELECT * FROM npd_dev.npd.T
-                                  EXCEPT SELECT * FROM npd_proof.npd.T WHERE release_date = '2026-09-29') x) AS only_phase2;
+```python
+from npd_loader.flatten.engine import columns, ref_columns
+from npd_loader.flatten.specs import ALL_TABLES, TABLE_TYPES
+out = []
+for t in ALL_TABLES:
+    rtype, refs, sel, joins = TABLE_TYPES[t.name], ref_columns(t), [], []
+    for c in columns(t):
+        if c == "resource_id":
+            sel.append("rt.name + '-' + s.resource_id AS resource_id")
+        elif c == "resource_type":
+            sel.append("rt.name AS resource_type")
+        elif c in refs:
+            a = f"k_{c}"
+            sel.append(f"'{refs[c]}-' + {a}.resource_id AS [{c}]")
+            joins.append(f"LEFT JOIN npd_dev.npd.resource_state {a} ON {a}.resource_key = x.[{c[:-3]}_key]")
+        else:
+            sel.append(f"x.[{c}]")
+    p2 = (f"SELECT {', '.join(sel)} FROM npd_dev.npd.[{t.name}] x JOIN npd_dev.npd.resource_state s "
+          f"ON s.resource_key = x.resource_key JOIN npd_dev.npd.resource_type rt ON rt.resource_type_id = "
+          f"s.resource_type_id {' '.join(joins)}")
+    p1 = f"SELECT {', '.join(f'[{c}]' for c in columns(t))} FROM npd_proof.npd.[{t.name}] WHERE release_date = '2026-09-29'"
+    out.append(f"SELECT '{t.name}' AS t, (SELECT COUNT_BIG(*) FROM ({p1}) a) AS phase1, "
+               f"(SELECT COUNT_BIG(*) FROM ({p2}) b) AS phase2, "
+               f"(SELECT COUNT_BIG(*) FROM ({p1} EXCEPT {p2}) c) AS only_phase1, "
+               f"(SELECT COUNT_BIG(*) FROM ({p2} EXCEPT {p1}) d) AS only_phase2;")
+open("compare.sql", "w").write("SET NOCOUNT ON;
+" + "
+".join(out) + "
+")
 ```
+
+Also record: `SELECT COUNT(*) FROM npd_dev.npd.resource_state WHERE hash IS NULL` (references to missing data; 0
+expected for 2026-09-29) and the size of every table (`sp_spaceused`) next to its `npd_proof` size.
 
 Record the results; explain every non-zero difference (expected sources: extension first-match vs Phase 1 MAX;
 millisecond rounding at exact .0005 boundaries).
