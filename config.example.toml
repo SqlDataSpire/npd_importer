@@ -15,6 +15,8 @@ env_file = 'C:\npd-loader\database.prd.env'
 connection = "data"           # must be a type "mssql" connection (SQL Server only)
 stage_schema = "npd_stage"    # fixed staging tables, truncated at the start of each import
 schema = "npd"
+flatten_workers = 4           # .ndjson files flattened in parallel (Python processes)
+bcp_workers = 8               # bcp loads running in parallel
 lock_timeout_seconds = 30     # the delta apply gives up waiting for a table lock after this (3 attempts)
 
 [catalog]

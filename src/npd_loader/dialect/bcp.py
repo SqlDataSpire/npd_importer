@@ -8,6 +8,8 @@ import urllib.parse
 
 from sqlalchemy.engine import Engine
 
+from npd_loader.config import ConfigError
+
 _COPIED = re.compile(r"(\d+) rows copied")
 
 
@@ -18,6 +20,9 @@ class BcpError(Exception):
 def bcp_target(engine: Engine) -> tuple[str, str]:
     odbc = urllib.parse.unquote_plus(engine.url.query.get("odbc_connect", ""))
     parts = {k.strip().upper(): v.strip() for k, _, v in (p.partition("=") for p in odbc.split(";")) if k}
+    missing = [k for k in ("SERVER", "DATABASE") if not parts.get(k)]
+    if missing:
+        raise ConfigError(f"bcp needs SERVER and DATABASE in the connection string; missing: {', '.join(missing)}")
     return parts["SERVER"], parts["DATABASE"]
 
 

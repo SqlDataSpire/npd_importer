@@ -1,4 +1,3 @@
-import copy
 from datetime import date
 
 import pytest
@@ -9,7 +8,6 @@ from npd_loader.stages import Outcome, StageFailed
 from fakes import FakeCatalog
 from helpers import make_ctx
 from release_builder import build_release
-import fixture_data
 
 
 @pytest.fixture

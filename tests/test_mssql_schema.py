@@ -1,5 +1,6 @@
 from npd_loader.flatten.engine import columns
 from npd_loader.flatten.specs import ALL_TABLES
+from npd_loader.flatten.stagefiles import HASH_COLUMNS
 
 
 def scalar(d, sql, *args):
@@ -34,3 +35,16 @@ def test_tables_have_spec_columns_and_primary_keys(mssql_dialect):
 def test_init_db_is_idempotent(mssql_dialect):
     mssql_dialect.init_db()
     mssql_dialect.init_db()
+
+
+def test_init_db_recreates_a_staging_table_whose_columns_changed(mssql_dialect):
+    d = mssql_dialect
+    stage = d.cfg.stage_schema
+    with d.engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.exec_driver_sql(f"ALTER TABLE {d.q(stage, 'practitioner')} DROP COLUMN npi")
+        conn.exec_driver_sql(f"ALTER TABLE {d.q(stage, 'resource_hash')} DROP COLUMN line_number")
+    d.init_db()
+    practitioner = next(t for t in ALL_TABLES if t.name == "practitioner")
+    with d.engine.connect() as conn:
+        assert d._columns_of(conn, stage, "practitioner") == columns(practitioner)
+        assert d._columns_of(conn, stage, "resource_hash") == list(HASH_COLUMNS)

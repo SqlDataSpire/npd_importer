@@ -1,10 +1,12 @@
 """The 26 npd tables as declarative specs (the Phase 1 T-SQL transforms, one for one)."""
 from __future__ import annotations
 
-import re
-
-from npd_loader.flatten.convert import boolean, join, number, ref, ts
+from npd_loader.flatten.convert import boolean, instant, join, number, ref, ts
 from npd_loader.flatten.engine import E, R, Table, ext, identifier, official_name, path
+
+# Bump whenever a spec change must reach existing rows: it is part of every resource hash, so the next import classifies
+# every resource as changed and rewrites it.
+SPEC_VERSION = 1
 
 NDH = "http://hl7.org/fhir/us/ndh/StructureDefinition/"
 NPI = ("http://terminology.hl7.org/NamingSystem/npi", "http://hl7.org/fhir/sid/us-npi")
@@ -24,13 +26,7 @@ def _long_text_to_null(v):
     return None if isinstance(v, str) and len(v) > 4000 else v
 
 
-def _instant(v):
-    """meta.lastUpdated: Phase 1 loaded it into the raw datetime2(3) column from a Python datetime (the driver
-    truncates microseconds), unlike fhir_ts which rounds; the golden values keep that truncation."""
-    return ts(re.sub(r"(\.\d{3})\d+", lambda m: m.group(1), v)) if isinstance(v, str) else ts(v)
-
-
-LAST_UPDATED = {"last_updated": R("meta.lastUpdated", _instant)}
+LAST_UPDATED = {"last_updated": R("meta.lastUpdated", instant)}
 TELECOM = {"system": E("system"), "use": E("use"), "value": E("value")}
 ADDRESS = {"use": E("use"), "type": E("type"), "line1": E("line[0]"), "line2": E("line[1]"),
            "extra_lines": E(lambda e: join(e.get("line") if isinstance(e, dict) else None, ", ", 2)),

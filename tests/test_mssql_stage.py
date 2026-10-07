@@ -61,3 +61,14 @@ def test_too_long_value_fails_with_the_bcp_error(mssql_dialect, tmp_path):
     rec = {**fixture_data.ORG1, "address": [{"city": "x" * 1500}]}         # organization_address.city nvarchar(1000)
     with pytest.raises(BcpError, match="organization_address"):
         d.stage_release(storage, R, 7, inputs_for(storage, {"01-Organization.ndjson": orjson.dumps(rec) + b"\n"}))
+
+
+def test_stage_release_removes_leftover_stage_files(mssql_dialect, tmp_path):
+    d = mssql_dialect
+    storage = LocalStorage(tmp_path / "data")
+    leftover = tmp_path / "data" / "stage" / "run_1" / "practitioner.x.dat"
+    leftover.parent.mkdir(parents=True)
+    leftover.write_text("junk")
+    d.stage_release(storage, R, 7, inputs_for(storage, build_release("2026-09-29").ndjson))
+    assert not leftover.exists() and not (tmp_path / "data" / "stage").exists()
+    assert count(d, "resource_hash") == 12 and count(d, "practitioner") == 2

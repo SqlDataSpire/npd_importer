@@ -90,7 +90,7 @@ def _table(md: MetaData, qualified: str, *columns: Column) -> Table:
 
 
 class SqlCatalog:
-    """Catalog in any SQLAlchemy engine (css_catalog_local on Postgres, HIE_WAREHOUSE_META on SQL Server). Each call
+    """Catalog in any SQLAlchemy engine (HIE_WAREHOUSE_META on SQL Server). Each call
     runs in its own short transaction, so catalog writes commit independently of data loads and survive their
     failures. Column names are lowercase; SQL Server's case-insensitive collation matches the uppercase columns."""
 

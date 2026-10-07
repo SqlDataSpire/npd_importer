@@ -27,7 +27,9 @@ production.
 - Host: `bcp` (SQL Server command line utilities) on the PATH of the machine that runs npd-loader.
 - Disk: the `.ndjson.zst` originals are the backup and are kept; the extracted `.ndjson` files of the newest
   `[retention] keep_releases` releases are kept (`config.example.toml` sets 1). The current dataset is stored once,
-  and staging holds one release during an import.
+  and staging holds one release during an import. During an import the flattened stage files are also written under
+  `storage.root/stage` (roughly the size of the flattened release) and removed afterwards.
+- `init-db` expects a database without Phase 1 tables: use a fresh database (Phase 1 data lives in `npd_proof`).
 
 ### Install
 
@@ -63,18 +65,16 @@ There is no raw table and no backup inside the database: the `.ndjson.zst` origi
 backup. Retention deletes only older extracted `.ndjson` files. `import --force` applies a release older than the
 current one.
 
-### Tests
-
-    $env:NPD_TEST_MSSQL_DB = '{"type":"mssql","server":"cssnpi","database":"npd_test","trusted":"yes"}'
-    .\.venv\Scripts\python -m pytest
-
-SQL Server tests create and drop their own schemas in `npd_test` and never touch either catalog database.
-
 ## Upgrading
 
 Re-run `npd-loader init-db` after every upgrade of npd-loader. It applies new tables and the idempotent schema changes
 in `src/npd_loader/sql/mssql/init/900_migrations.sql` (the only place post-deployment changes to existing tables go),
-and recreates the `v_*` views automatically.
+and recreates the `v_*` views automatically. A staging table whose columns no longer match the specs is dropped and
+recreated by `init-db` (staging is disposable).
+
+Existing rows are only rewritten when their resource changes. After a change to the flatten specs or a new column that
+must be filled for existing resources, bump `SPEC_VERSION` in `src/npd_loader/flatten/specs.py`: it is part of every
+resource hash, so the next import classifies every resource as changed and rewrites all rows.
 
 ## Commands
 
@@ -112,4 +112,9 @@ python -m venv .venv
 .venv/bin/python -m pip install -e ".[test]"        # Windows: .venv\Scripts\python
 ```
 
-SQL Server tests need `NPD_TEST_MSSQL_DB` (see Tests above); without it they are skipped.
+SQL Server tests need `NPD_TEST_MSSQL_DB`; without it they are skipped:
+
+    $env:NPD_TEST_MSSQL_DB = '{"type":"mssql","server":"cssnpi","database":"npd_test","trusted":"yes"}'
+    .\.venv\Scripts\python -m pytest
+
+They create and drop their own schemas in `npd_test` and never touch either catalog database.

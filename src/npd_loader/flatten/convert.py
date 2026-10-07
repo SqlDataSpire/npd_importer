@@ -32,6 +32,12 @@ def ts(v: Any) -> str | None:
     return d.isoformat(sep=" ", timespec="milliseconds")
 
 
+def instant(v):
+    """meta.lastUpdated: Phase 1 loaded it into the raw datetime2(3) column from a Python datetime (the driver
+    truncates microseconds), unlike fhir_ts which rounds; the golden values keep that truncation."""
+    return ts(re.sub(r"(\.\d{3})\d+", lambda m: m.group(1), v)) if isinstance(v, str) else ts(v)
+
+
 def boolean(v: Any) -> str | None:
     if v is None:
         return None

@@ -66,3 +66,20 @@ def test_encode_matches_json_value_semantics():
     assert encode("x") == "x" and encode(5) == "5" and encode(1.5) == "1.5"
     with pytest.raises(ConvertError):
         encode("ab")
+
+
+def test_hash_depends_on_spec_version(tmp_path, monkeypatch):
+    from npd_loader.flatten import stagefiles
+    inp, src = write(tmp_path, "01-Organization.ndjson", orjson.dumps(fixture_data.ORG1) + b"\n")
+    hashes = []
+    for version in (1, 2):
+        monkeypatch.setattr(stagefiles, "SPEC_VERSION", version)
+        res = flatten_file(inp, src, "2026-09-29", str(tmp_path / f"out{version}"))
+        hashes.append(read_rows([f for f in res.files if f.table == "resource_hash"][0].path)[0][2])
+    assert hashes[0] != hashes[1]
+
+
+def test_flatten_files_without_inputs_is_empty(tmp_path):
+    from datetime import date
+    res = flatten_files([], LocalStorage(tmp_path), date(2026, 9, 29), str(tmp_path / "out"), 4)
+    assert res.files == [] and res.rows == {} and res.resources == {}

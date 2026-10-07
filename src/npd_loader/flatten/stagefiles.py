@@ -10,9 +10,9 @@ from datetime import date
 
 import orjson
 
-from npd_loader.flatten.convert import ConvertError, ts
+from npd_loader.flatten.convert import ConvertError, instant
 from npd_loader.flatten.engine import flatten_resource
-from npd_loader.flatten.specs import tables_for
+from npd_loader.flatten.specs import SPEC_VERSION, tables_for
 from npd_loader.raw_load import NdjsonInput, RawLoadError, iter_lines
 
 FIELD, ROW = "\x1f", "\x1e"
@@ -115,8 +115,9 @@ def flatten_file(inp: NdjsonInput, src_path: str, release: str, out_dir: str,
                 try:
                     for table, values in flatten_resource(res, tables, (release, rid, inp.file_id, inp.zst_file_id)):
                         writers[table].write(values)
-                    writers[HASH_TABLE].write((inp.resource_type, rid, hashlib.sha1(text.encode("utf-8")).hexdigest(),
-                                               ts((res.get("meta") or {}).get("lastUpdated")), release,
+                    writers[HASH_TABLE].write((inp.resource_type, rid, hashlib.sha1(f"{SPEC_VERSION}\n".encode()
+                                                                  + text.encode("utf-8")).hexdigest(),
+                                               instant((res.get("meta") or {}).get("lastUpdated")), release,
                                                inp.file_id, number))
                 except ConvertError as exc:
                     raise FlattenError(f"{inp.name}: line {number}: {exc}", inp.file_id) from exc
@@ -143,6 +144,8 @@ def flatten_files(inputs: list[NdjsonInput], storage, release: date, out_dir: st
                   chunk_rows: int = 500_000) -> FlattenResult:
     jobs = [(inp, storage.local_path(inp.rel_path), release.isoformat(), out_dir, chunk_rows) for inp in inputs]
     total = FlattenResult()
+    if not jobs:
+        return total
     if workers <= 1 or len(jobs) == 1:
         for job in jobs:
             total.merge(_job(job))

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import time
@@ -18,7 +19,7 @@ from npd_loader.dialect import DeltaResult, LockUnavailable, StageResult
 from npd_loader.dialect.bcp import bcp_in, bcp_target
 from npd_loader.flatten.engine import columns
 from npd_loader.flatten.specs import ALL_TABLES, TABLE_TYPES
-from npd_loader.flatten.stagefiles import HASH_TABLE, FlattenError, flatten_files
+from npd_loader.flatten.stagefiles import HASH_COLUMNS, HASH_TABLE, FlattenError, flatten_files
 from npd_loader.sqltext import render, split_batches, sql_scripts
 
 log = logging.getLogger(__name__)
@@ -47,7 +48,6 @@ class MssqlDialect:
     def q(*parts: str) -> str:
         return ".".join("[" + p.replace("]", "]]") + "]" for p in parts)
 
-
     @staticmethod
     def lit(value: str) -> str:
         return "N'" + value.replace("'", "''") + "'"
@@ -59,33 +59,47 @@ class MssqlDialect:
     def _autocommit(self) -> Connection:
         return self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
 
-    # -- catalog views ------------------------------------------------------------------------------------
+    # -- Dialect ------------------------------------------------------------------------------------------
+    def _columns_of(self, conn: Connection, schema: str, table: str) -> list[str]:
+        return [r[0] for r in conn.exec_driver_sql(
+            "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? "
+            "ORDER BY ORDINAL_POSITION", (schema, table))]
 
-
-    # -- Dialect --------------------------------------------------------------------------------------------
     def init_db(self) -> None:
         tokens = self._tokens()
         schema, stage = self.cfg.schema, self.cfg.stage_schema
         with self._autocommit() as conn:
+            # staging is disposable: a staging table whose columns no longer match its spec is dropped and recreated
+            # (resource_hash by the init script below, the table stages by the loop after it)
+            have = self._columns_of(conn, stage, HASH_TABLE)
+            if have and have != list(HASH_COLUMNS):
+                log.info("recreating staging table %s.%s (columns changed)", stage, HASH_TABLE)
+                conn.exec_driver_sql(f"DROP TABLE {self.q(stage, HASH_TABLE)}")
             for name, text in sql_scripts("mssql", "init"):
                 for batch in split_batches(render(text, tokens)):
                     conn.exec_driver_sql(batch)
             for t in ALL_TABLES:
                 # fixed staging heap, same columns (in spec order) as the permanent table; created once, reused
-                if conn.exec_driver_sql("SELECT OBJECT_ID(?, 'U')", (f"{stage}.{t.name}",)).scalar() is None:
+                have = self._columns_of(conn, stage, t.name)
+                if have and have != columns(t):
+                    log.info("recreating staging table %s.%s (columns changed)", stage, t.name)
+                    conn.exec_driver_sql(f"DROP TABLE {self.q(stage, t.name)}")
+                    have = []
+                if not have:
                     cols = ", ".join(self.q(c) for c in columns(t))
                     conn.exec_driver_sql(f"SELECT TOP 0 {cols} INTO {self.q(stage, t.name)} FROM {self.q(schema, t.name)}")
                 conn.exec_driver_sql(f"CREATE OR ALTER VIEW {self.q(schema, 'v_' + t.name)} AS "
                                      f"SELECT * FROM {self.q(schema, t.name)}")
+            if conn.exec_driver_sql("SELECT is_read_committed_snapshot_on FROM sys.databases "
+                                    "WHERE name = DB_NAME()").scalar() == 0:
+                log.warning("READ_COMMITTED_SNAPSHOT is OFF on this database: readers will block while a delta "
+                            "applies; see 'DBA prerequisites' in the README")
 
     def published_releases(self) -> list[date]:
         with self.engine.connect() as conn:
             rows = conn.exec_driver_sql(
                 f"SELECT release_date FROM {self.q(self.cfg.schema, 'release')} ORDER BY release_date").fetchall()
         return [r[0] for r in rows]
-
-
-    # -- raw load -----------------------------------------------------------------------------------------
 
 
     def _stage_tables(self) -> list[str]:
@@ -101,6 +115,8 @@ class MssqlDialect:
         lock, this is the only writer of staging; leftovers of a killed run are removed by the truncate."""
         s = self.cfg.stage_schema
         self.truncate_stage()
+        stage_root = storage.local_path("stage")
+        shutil.rmtree(stage_root, ignore_errors=True)       # stage files of a killed run (the import lock is held)
         out_dir = storage.local_path(f"stage/run_{run_id}")
         try:
             flat = flatten_files(inputs, storage, release, out_dir, self.cfg.flatten_workers)
@@ -111,6 +127,10 @@ class MssqlDialect:
                     fut.result()
         finally:
             shutil.rmtree(out_dir, ignore_errors=True)
+            try:
+                os.rmdir(stage_root)                         # only succeeds when empty
+            except OSError:
+                pass
         with self.engine.connect() as conn:
             for table, expected in flat.rows.items():
                 got = conn.exec_driver_sql(f"SELECT COUNT_BIG(*) FROM {self.q(s, table)}").scalar()
@@ -132,7 +152,8 @@ class MssqlDialect:
         the release as seen. Resources missing from the release are kept (aging data)."""
         s, schema = self.cfg.stage_schema, self.cfg.schema
         hashes, state = self.q(s, HASH_TABLE), self.q(schema, "resource_state")
-        delta = self.q(s, "delta")
+        delta = self.q(s, "delta")      # scratch table rebuilt per apply, not one of the fixed staging tables
+        # Classifying outside the transaction is safe: the import lock is held, so nothing else changes resource_state.
         with self._autocommit() as conn:
             conn.exec_driver_sql(f"DROP TABLE IF EXISTS {delta}")
             conn.exec_driver_sql(
@@ -201,7 +222,6 @@ class MssqlDialect:
                         log.warning("UPDATE STATISTICS %s.%s failed: %s", schema, t.name, exc)
         return DeltaResult(kinds, inserted, replaced)
 
-
     def _locked_transaction(self, work: Callable[[Connection], "T"], what: str) -> "T":
         """Run `work` in one transaction with SET LOCK_TIMEOUT; retry the whole transaction LOCK_ATTEMPTS times on
         error 1222 (lock request timeout), then raise LockUnavailable."""
@@ -225,7 +245,6 @@ class MssqlDialect:
                 log.warning("%s: lock request timed out (attempt %d of %d); retrying", what, attempt, LOCK_ATTEMPTS)
                 self._sleep(LOCK_BACKOFF_SECONDS * attempt)
         raise AssertionError("unreachable")
-
 
     @contextmanager
     def run_lock(self, stage: str) -> Iterator[bool]:

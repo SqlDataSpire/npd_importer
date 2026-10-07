@@ -7,7 +7,9 @@
 --       ALTER TABLE <<schema>>.practitioner ADD new_column nvarchar(1000) NULL
 --   GO
 --
--- init-db recreates the v_* views afterwards.
+-- init-db recreates the v_* views afterwards. A column added to a permanent table reaches staging automatically on
+-- init-db (a staging table whose columns differ from the spec is dropped and recreated). Existing rows only get the new
+-- column's values after a SPEC_VERSION bump (flatten/specs.py), which makes the next import rewrite every resource.
 --
 IF COL_LENGTH(<<s:schema>> + N'.release', N'new_resources') IS NULL
     ALTER TABLE <<schema>>.release ADD new_resources int NULL, changed_resources int NULL,
