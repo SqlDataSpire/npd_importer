@@ -7,6 +7,7 @@ import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Callable, Iterator, TypeVar
 
@@ -15,7 +16,7 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError
 
 from npd_loader.config import NpdDbConfig
-from npd_loader.dialect import DeltaResult, LockUnavailable, PublishConflict, StageResult, TransformResult
+from npd_loader.dialect import DeltaResult, LockUnavailable, StageResult
 from npd_loader.dialect.bcp import bcp_in, bcp_target
 from npd_loader.flatten.engine import columns
 from npd_loader.flatten.specs import ALL_TABLES, TABLE_TYPES
@@ -55,6 +56,18 @@ def to_utc_naive(text: str | None) -> datetime | None:
     if value.tzinfo is not None:
         value = value.astimezone(timezone.utc).replace(tzinfo=None)
     return value
+
+
+
+class PublishConflict(Exception):
+    """Phase 1 leftover, removed with the Phase 1 methods in Task 10."""
+
+
+@dataclass
+class TransformResult:
+    """Phase 1 leftover, removed with the Phase 1 methods in Task 10."""
+    tables: dict[str, str]
+    counts: dict[str, int]
 
 
 class MssqlDialect:

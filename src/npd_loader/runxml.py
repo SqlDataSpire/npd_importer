@@ -31,5 +31,6 @@ def parse_release(config_xml: str | None) -> date | None:
 def build_output_xml(items: list[dict[str, object]], item_tag: str) -> str:
     root = ET.Element("WAREHOUSE_RUN_OUTPUT")
     for item in items:
-        ET.SubElement(root, item_tag, {k: str(v) for k, v in item.items() if v is not None})
+        attrs = {k: str(v) for k, v in item.items() if v is not None and k != "_tag"}
+        ET.SubElement(root, str(item.get("_tag", item_tag)), attrs)
     return ET.tostring(root, encoding="unicode")

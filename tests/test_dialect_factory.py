@@ -1,17 +1,16 @@
 import pytest
 
-from npd_loader.config import NpdDbConfig
+from npd_loader.config import ConfigError, NpdDbConfig
 from npd_loader.connections import build_connection
 from npd_loader.dialect import dialect_for
 
-CFG = NpdDbConfig(connection="data", raw_schema="npd_raw", schema="npd")
+CFG = NpdDbConfig(connection="data", schema="npd")
 
 
-def test_postgres_dialect_selected():
+def test_postgres_rejected():
     pg = build_connection("pg", {"type": "postgres", "server": "h:5432", "database": "npd", "UN": "u", "PW": "p"})
-    d = dialect_for(pg, CFG)
-    assert d.name == "postgres" and d.engine is pg.engine and d.cfg is CFG
-    assert d.engine.url.render_as_string(hide_password=False) == "postgresql+psycopg2://u:p@h:5432/npd"
+    with pytest.raises(ConfigError, match="SQL Server only"):
+        dialect_for(pg, CFG)
 
 
 def test_unknown_engine_rejected():

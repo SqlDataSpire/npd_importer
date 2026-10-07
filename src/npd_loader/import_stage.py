@@ -1,4 +1,4 @@
-"""IMPORT stage: raw load + transforms into standalone tables, then one-transaction publication."""
+"""IMPORT stage: flatten + stage the release, then apply the delta to the current dataset."""
 from __future__ import annotations
 
 import logging
@@ -6,10 +6,11 @@ from dataclasses import dataclass
 from datetime import date
 
 from npd_loader.catalog import SUCCESS, Run
-from npd_loader.dialect import PublishConflict
+from npd_loader.dialect import DeltaResult, StageResult
 from npd_loader.extract import run_extract
 from npd_loader.manifest import resource_type_for
-from npd_loader.raw_load import RAW_PARENT, NdjsonInput, RawLoadError
+from npd_loader.flatten.stagefiles import FlattenError
+from npd_loader.raw_load import NdjsonInput
 from npd_loader.retention import apply_retention
 from npd_loader.runxml import build_output_xml
 from npd_loader.stages import (Context, Outcome, StageFailed, close_interrupted_runs, completed_child, config_xml,
@@ -41,37 +42,29 @@ def find_inputs(ctx: Context, release: date, download_run: Run) -> ImportInputs 
     return ImportInputs(inputs, sorted(run_ids))
 
 
-def _drop_orphans(ctx: Context) -> None:
-    """With the import lock held no import is running, so any standalone table left by an import that was
-    killed (SIGTERM/SIGKILL/OOM) before its cleanup ran is an orphan."""
-    try:
-        dropped = ctx.dialect.drop_standalone_tables()
-    except Exception:
-        log.exception("could not drop orphaned standalone tables")
-        return
-    if dropped:
-        log.warning("dropped %d orphaned standalone tables of earlier interrupted imports: %s",
-                    len(dropped), ", ".join(dropped))
+def _summary(staged: StageResult, delta: DeltaResult, schema: str) -> list[dict]:
+    items: list[dict] = [{"resource_type": t, **k} for t, k in sorted(delta.kinds.items())]
+    items += [{"table": f"{schema}.{t}", "inserted": delta.inserted.get(t, 0), "replaced": delta.replaced.get(t, 0),
+               "staged": staged.rows.get(t, 0)} for t in sorted(delta.inserted)]
+    return items
 
 
 def _import(ctx: Context, run: Run, release: date, inputs: list[NdjsonInput], force: bool) -> list[dict]:
-    db = ctx.config.npd_db
     d = ctx.dialect
-    if not force and d.is_published(release):
-        raise PublishConflict(f"release {release} is already published in {db.raw_schema}.{RAW_PARENT} "
-                              f"but the catalog has no successful import; rerun with --force to replace it")
-    with d.session():
-        raw = d.load_raw(ctx.storage, release, run.id, inputs)
-        transformed = d.run_transforms(raw.table, release, run.id)
-        d.publish(raw.table, transformed.tables, release, run.id, force)
-    return ([{"table": f"{db.raw_schema}.{RAW_PARENT}", "resource_type": t, "rows": n} for t, n in raw.rows.items()]
-            + [{"table": f"{db.schema}.{t}", "rows": n} for t, n in transformed.counts.items()])
+    newest = max(d.published_releases(), default=None)
+    if newest is not None and release < newest and not force:
+        raise StageFailed(f"release {release} is older than the current release {newest}; applying it would roll "
+                          f"the data back. Rerun with --force to apply it anyway")
+    staged = d.stage_release(ctx.storage, release, run.id, inputs)
+    delta = d.apply_delta(release, run.id)
+    return _summary(staged, delta, ctx.config.npd_db.schema)
 
 
 def _finish(ctx: Context, run: Run, release: date, summary: list[dict]) -> None:
     warnings = apply_retention(ctx, release)
+    items = [{"_tag": "delta", **i} if "resource_type" in i else i for i in summary]
     ctx.catalog.finish_run(run, SUCCESS, result="; ".join(warnings) or None,
-                           output_xml=build_output_xml(summary, item_tag="table"))
+                           output_xml=build_output_xml(items, item_tag="table"))
 
 
 def run_import(ctx: Context, release: date | None = None, force: bool = False) -> Outcome:
@@ -81,7 +74,6 @@ def run_import(ctx: Context, release: date | None = None, force: bool = False) -
         if not acquired:
             log.info("another import is running; nothing to do")
             return Outcome.LOCKED
-        _drop_orphans(ctx)
         close_interrupted_runs(ctx, cat.run_class_import)
         download_run = ctx.catalog.last_successful_run(cat.run_class_download, release)
         if download_run is None:
@@ -107,12 +99,8 @@ def run_import(ctx: Context, release: date | None = None, force: bool = False) -
         try:
             summary = _import(ctx, run, release, found.inputs, force)
         except Exception as exc:
-            if isinstance(exc, RawLoadError) and exc.file_id is not None:
+            if isinstance(exc, FlattenError) and exc.file_id is not None:
                 ctx.catalog.update_data_file(exc.file_id, exceptions=str(exc))
-            try:
-                ctx.dialect.drop_standalone_tables(run.id)
-            except Exception:
-                log.exception("could not drop standalone tables of run %s", run.id)
             fail_run(ctx, run, exc)
             raise StageFailed(f"import of release {release} failed: {exc}") from exc
         loaded = now()
