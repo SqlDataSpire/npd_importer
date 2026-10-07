@@ -27,6 +27,12 @@ class TransformResult:
     counts: dict[str, int]
 
 
+@dataclass
+class StageResult:
+    rows: dict[str, int]          # rows loaded per staging table (incl. resource_hash)
+    resources: dict[str, int]     # resources per resource type
+
+
 class Dialect(Protocol):
     name: str
     cfg: NpdDbConfig

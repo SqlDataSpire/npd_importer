@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from typing import Callable, Iterator, TypeVar
@@ -13,7 +15,10 @@ from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import DBAPIError
 
 from npd_loader.config import NpdDbConfig
-from npd_loader.dialect import LockUnavailable, PublishConflict, TransformResult
+from npd_loader.dialect import LockUnavailable, PublishConflict, StageResult, TransformResult
+from npd_loader.dialect.bcp import bcp_in, bcp_target
+from npd_loader.flatten.specs import ALL_TABLES
+from npd_loader.flatten.stagefiles import HASH_TABLE, FlattenError, flatten_files
 from npd_loader.raw_load import RAW_PARENT, NdjsonInput, RawLoadError, RawLoadResult, iter_lines, validate_line
 from npd_loader.sqltext import render, split_batches, sql_scripts, standalone_name
 from npd_loader.storage import Storage
@@ -228,6 +233,43 @@ class MssqlDialect:
             raise RawLoadError(f"duplicate resource ids: {detail}", file_ids.get(dups[0][0]) if dups else None) from exc
         self._check_row_counts(raw_schema, table, inputs, rows)
         return RawLoadResult(table, rows)
+
+    def _stage_tables(self) -> list[str]:
+        return [t.name for t in ALL_TABLES] + [HASH_TABLE]
+
+    def truncate_stage(self) -> None:
+        with self._autocommit() as conn:
+            for table in self._stage_tables():
+                conn.exec_driver_sql(f"TRUNCATE TABLE {self.q(self.cfg.stage_schema, table)}")
+
+    def stage_release(self, storage, release: date, run_id: int, inputs: list) -> StageResult:
+        """Empty the fixed staging tables, flatten the release's files in parallel and bcp them in. Holding the import
+        lock, this is the only writer of staging; leftovers of a killed run are removed by the truncate."""
+        s = self.cfg.stage_schema
+        self.truncate_stage()
+        out_dir = storage.local_path(f"stage/run_{run_id}")
+        try:
+            flat = flatten_files(inputs, storage, release, out_dir, self.cfg.flatten_workers)
+            server, database = bcp_target(self.engine)
+            with ThreadPoolExecutor(self.cfg.bcp_workers) as pool:
+                futures = [pool.submit(bcp_in, server, database, s, f.table, f.path, f.rows) for f in flat.files]
+                for fut in futures:
+                    fut.result()
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+        with self.engine.connect() as conn:
+            for table, expected in flat.rows.items():
+                got = conn.exec_driver_sql(f"SELECT COUNT_BIG(*) FROM {self.q(s, table)}").scalar()
+                if got != expected:
+                    raise FlattenError(f"staging table {table}: flattened {expected} rows but loaded {got}")
+            dups = conn.exec_driver_sql(
+                f"SELECT TOP 20 resource_type, resource_id, MIN(ndjson_file_id), STRING_AGG(CAST(line_number AS "
+                f"varchar(20)), ',') WITHIN GROUP (ORDER BY line_number) FROM {self.q(s, HASH_TABLE)} "
+                f"GROUP BY resource_type, resource_id HAVING COUNT(*) > 1 ORDER BY 1, 2").fetchall()
+        if dups:
+            detail = "; ".join(f"{t} {i} at lines {lines}" for t, i, _, lines in dups)
+            raise FlattenError(f"duplicate resource ids: {detail}", dups[0][2])
+        return StageResult(flat.rows, flat.resources)
 
     def _check_row_counts(self, schema: str, table: str, inputs: list[NdjsonInput], read: dict[str, int]) -> None:
         """One scan (of the narrow resource_key index) comparing rows per resource type with the lines read."""
