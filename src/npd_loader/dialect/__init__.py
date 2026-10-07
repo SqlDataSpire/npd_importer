@@ -33,6 +33,13 @@ class StageResult:
     resources: dict[str, int]     # resources per resource type
 
 
+@dataclass
+class DeltaResult:
+    kinds: dict[str, dict[str, int]]   # resource type -> {"new", "changed", "unchanged", "not_seen"}
+    inserted: dict[str, int]           # rows inserted per table
+    replaced: dict[str, int]           # rows removed per table because their resource changed
+
+
 class Dialect(Protocol):
     name: str
     cfg: NpdDbConfig
