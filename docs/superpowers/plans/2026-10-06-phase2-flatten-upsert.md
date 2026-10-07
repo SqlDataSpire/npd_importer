@@ -2052,26 +2052,27 @@ git commit -m "test(phase2): two releases end to end through the CLI (first load
 **Files:**
 - Create: `docs/profile/2026-10-XX-phase2-dev-import.md` (actual date)
 
-Prerequisites (ask the user before starting): the Phase 1 tables for 2026-09-29 exist in `npd_dev.npd` (the SSMS
-finish script ran); writing a new IMPORT run to `HIE_WAREHOUSE_META_DEV` is approved.
+Prerequisites (ask the user before starting): writing a new IMPORT run to `HIE_WAREHOUSE_META_DEV` is approved. Since
+2026-10-07 the Phase 1 result for 2026-09-29 lives in the database `npd_proof` (the former `npd_dev`, renamed and kept
+for investigation), and `npd_dev` is a new empty database with SIMPLE recovery and `READ_COMMITTED_SNAPSHOT ON`.
 
-- [ ] **Step 1: Configure** `config.phase2.local.toml` (gitignored by `*.local.toml`) from `config.local.toml` with
-`[npd_db] schema = "npd2"`, `stage_schema = "npd2_stage"`. Ask the user whether to enable
-`READ_COMMITTED_SNAPSHOT` on `npd_dev` now (`ALTER DATABASE [npd_dev] SET READ_COMMITTED_SNAPSHOT ON`, needs a moment
-with no other connections); the run works either way, readers just block during the apply without it.
-- [ ] **Step 2: Run** `npd-loader --config config.phase2.local.toml init-db`, then
-`npd-loader --config config.phase2.local.toml import --release 2026-09-29 --force` (the .ndjson files are on `E:`).
-Record start/end per phase from the log (flatten, bcp, apply).
+- [ ] **Step 1: Configure.** `config.local.toml` already points at `database.dev.env` (`npd_dev` +
+`HIE_WAREHOUSE_META_DEV`); update its `[npd_db]` section to the Phase 2 keys (`schema = "npd"`,
+`stage_schema = "npd_stage"`, no `raw_schema`).
+- [ ] **Step 2: Run** `npd-loader --config config.local.toml init-db`, then
+`npd-loader --config config.local.toml import --release 2026-09-29 --force` (`--force` because dev run 7009 already
+recorded 2026-09-29 as imported; the .ndjson files are on `E:`). Record start/end per phase from the log (flatten, bcp,
+apply).
 - [ ] **Step 3: Compare with Phase 1** for each of the 26 tables (read-only):
 
 ```sql
 -- per table T: counts and differences both ways (identical column lists)
-SELECT (SELECT COUNT_BIG(*) FROM npd_dev.npd.T WHERE release_date = '2026-09-29') AS phase1,
-       (SELECT COUNT_BIG(*) FROM npd_dev.npd2.T) AS phase2,
-       (SELECT COUNT_BIG(*) FROM (SELECT * FROM npd_dev.npd.T WHERE release_date = '2026-09-29'
-                                  EXCEPT SELECT * FROM npd_dev.npd2.T) x) AS only_phase1,
-       (SELECT COUNT_BIG(*) FROM (SELECT * FROM npd_dev.npd2.T
-                                  EXCEPT SELECT * FROM npd_dev.npd.T WHERE release_date = '2026-09-29') x) AS only_phase2;
+SELECT (SELECT COUNT_BIG(*) FROM npd_proof.npd.T WHERE release_date = '2026-09-29') AS phase1,
+       (SELECT COUNT_BIG(*) FROM npd_dev.npd.T) AS phase2,
+       (SELECT COUNT_BIG(*) FROM (SELECT * FROM npd_proof.npd.T WHERE release_date = '2026-09-29'
+                                  EXCEPT SELECT * FROM npd_dev.npd.T) x) AS only_phase1,
+       (SELECT COUNT_BIG(*) FROM (SELECT * FROM npd_dev.npd.T
+                                  EXCEPT SELECT * FROM npd_proof.npd.T WHERE release_date = '2026-09-29') x) AS only_phase2;
 ```
 
 Record the results; explain every non-zero difference (expected sources: extension first-match vs Phase 1 MAX;
