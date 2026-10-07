@@ -17,7 +17,7 @@ def write_env_file(path, docs: dict) -> str:
 
 
 def config_data(storage_root: Path, manifest_url: str, env_file: str | None = None,
-                schemas: tuple[str, str] = ("npd_raw", "npd"), catalog_tables: tuple[str, str] | None = None,
+                schemas: tuple[str, str] = ("npd_stage", "npd"), catalog_tables: tuple[str, str] | None = None,
                 keep_releases: int = 5) -> dict:
     catalog = {"connection": "catalog", "project": "NPD", "run_type": "National Provider Directory",
                "file_set": "NPD_FHIR"}
@@ -27,7 +27,7 @@ def config_data(storage_root: Path, manifest_url: str, env_file: str | None = No
         "source": {"manifest_url": manifest_url},
         "storage": {"backend": "local", "root": str(storage_root)},
         "databases": {"env_file": env_file or "unused.env"},
-        "npd_db": {"connection": "data", "raw_schema": schemas[0], "schema": schemas[1]},
+        "npd_db": {"connection": "data", "stage_schema": schemas[0], "schema": schemas[1]},
         "catalog": catalog,
         "download": {"max_attempts": 3, "backoff_seconds": 0, "timeout_seconds": 10},
         "retention": {"keep_releases": keep_releases},

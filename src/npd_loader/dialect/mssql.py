@@ -78,15 +78,8 @@ class MssqlDialect:
         return "N'" + value.replace("'", "''") + "'"
 
     def _tokens(self) -> dict[str, str]:
-        tokens: dict[str, str] = {}
-        for key, schema in (("schema", self.cfg.schema), ("raw_schema", self.cfg.raw_schema)):
-            tokens[key] = self.q(schema)
-            tokens[f"s:{key}"] = self.lit(schema)
-            tokens[f"pf:{key}"] = self.q(self.pf(schema))
-            tokens[f"ps:{key}"] = self.q(self.ps(schema))
-            tokens[f"pfname:{key}"] = self.lit(self.pf(schema))
-            tokens[f"psname:{key}"] = self.lit(self.ps(schema))
-        return tokens
+        return {"schema": self.q(self.cfg.schema), "s:schema": self.lit(self.cfg.schema),
+                "stage_schema": self.q(self.cfg.stage_schema), "s:stage_schema": self.lit(self.cfg.stage_schema)}
 
     def _autocommit(self) -> Connection:
         return self.engine.connect().execution_options(isolation_level="AUTOCOMMIT")
@@ -111,16 +104,21 @@ class MssqlDialect:
 
     # -- Dialect --------------------------------------------------------------------------------------------
     def init_db(self) -> None:
+        from npd_loader.flatten.engine import columns
+        from npd_loader.flatten.specs import ALL_TABLES
         tokens = self._tokens()
+        schema, stage = self.cfg.schema, self.cfg.stage_schema
         with self._autocommit() as conn:
             for name, text in sql_scripts("mssql", "init"):
                 for batch in split_batches(render(text, tokens)):
                     conn.exec_driver_sql(batch)
-            for schema in (self.cfg.raw_schema, self.cfg.schema):
-                for table in self.parent_tables(conn, schema):
-                    conn.exec_driver_sql(
-                        f"CREATE OR ALTER VIEW {self.q(schema, 'v_' + table)} AS SELECT * FROM {self.q(schema, table)} "
-                        f"WHERE release_date = (SELECT MAX(release_date) FROM {self.q(self.cfg.schema, 'release')})")
+            for t in ALL_TABLES:
+                # fixed staging heap, same columns (in spec order) as the permanent table; created once, reused
+                if conn.exec_driver_sql("SELECT OBJECT_ID(?, 'U')", (f"{stage}.{t.name}",)).scalar() is None:
+                    cols = ", ".join(self.q(c) for c in columns(t))
+                    conn.exec_driver_sql(f"SELECT TOP 0 {cols} INTO {self.q(stage, t.name)} FROM {self.q(schema, t.name)}")
+                conn.exec_driver_sql(f"CREATE OR ALTER VIEW {self.q(schema, 'v_' + t.name)} AS "
+                                     f"SELECT * FROM {self.q(schema, t.name)}")
 
     def published_releases(self) -> list[date]:
         with self.engine.connect() as conn:

@@ -10,5 +10,6 @@
 -- Columns added to a partitioned parent apply to every partition. Standalone tables are created from the parent,
 -- so they get new columns too. init-db recreates the v_* views afterwards.
 --
--- (No migrations yet.)
-SELECT 1
+IF COL_LENGTH(<<s:schema>> + N'.release', N'new_resources') IS NULL
+    ALTER TABLE <<schema>>.release ADD new_resources int NULL, changed_resources int NULL,
+        unchanged_resources int NULL, not_seen_resources int NULL

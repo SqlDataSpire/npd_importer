@@ -23,7 +23,7 @@ def test_example_config_loads():
     assert cfg.source.manifest_url == "https://directory.cms.gov/downloads/manifest.json"
     assert cfg.storage.root == "D:\\npd"
     assert cfg.catalog.run_table == "dbo.MASTER_WAREHOUSE_RUN"
-    assert cfg.npd_db.raw_schema == "npd_raw"
+    assert cfg.npd_db.stage_schema == "npd_stage"
     assert cfg.npd_db.schema == "npd"
     assert cfg.catalog.file_set == "NPD_FHIR"
     assert cfg.retention.keep_releases == 1
@@ -32,7 +32,7 @@ def test_example_config_loads():
 
 def test_defaults_for_optional_sections_and_labels():
     cfg = parse_config(minimal())
-    assert cfg.npd_db.raw_schema == "npd_raw"
+    assert cfg.npd_db.stage_schema == "npd_stage"
     assert cfg.catalog.run_class_download == "DOWNLOAD"
     assert cfg.catalog.run_class_extract == "EXTRACT"
     assert cfg.catalog.run_class_import == "IMPORT"
@@ -106,8 +106,23 @@ def test_legacy_connection_keys_are_rejected(section, key):
         parse_config(data)
 
 
-def test_raw_schema_must_differ_from_schema():
+def test_stage_schema_must_differ_from_schema():
     data = minimal()
-    data["npd_db"] = {"connection": "data", "raw_schema": "npd", "schema": "npd"}
-    with pytest.raises(ConfigError, match="raw_schema"):
+    data["npd_db"] = {"connection": "data", "stage_schema": "npd", "schema": "npd"}
+    with pytest.raises(ConfigError, match="stage_schema"):
+        parse_config(data)
+
+
+def test_raw_schema_key_is_rejected():
+    data = minimal()
+    data["npd_db"]["raw_schema"] = "npd_raw"
+    with pytest.raises(ConfigError, match="stage_schema"):
+        parse_config(data)
+
+
+@pytest.mark.parametrize("key,value", [("flatten_workers", 0), ("bcp_workers", 0), ("lock_timeout_seconds", 0)])
+def test_phase2_ranges(key, value):
+    data = minimal()
+    data["npd_db"][key] = value
+    with pytest.raises(ConfigError, match=key):
         parse_config(data)

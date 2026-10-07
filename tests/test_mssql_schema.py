@@ -1,12 +1,5 @@
-from datetime import date
-
-PARENTS = {"endpoint", "healthcare_service", "healthcare_service_location", "identifier", "insurance_plan",
-           "insurance_plan_alias", "insurance_plan_network", "location", "location_telecom", "organization",
-           "organization_address", "organization_affiliation", "organization_affiliation_network",
-           "organization_endpoint", "organization_telecom", "practitioner", "practitioner_address",
-           "practitioner_name", "practitioner_qualification", "practitioner_role", "practitioner_role_code",
-           "practitioner_role_endpoint", "practitioner_role_location", "practitioner_role_specialty",
-           "practitioner_role_telecom", "practitioner_telecom"}
+from npd_loader.flatten.engine import columns
+from npd_loader.flatten.specs import ALL_TABLES
 
 
 def scalar(d, sql, *args):
@@ -14,41 +7,30 @@ def scalar(d, sql, *args):
         return conn.exec_driver_sql(sql, args).scalar()
 
 
-def test_init_db_creates_partitioned_parents_and_views(mssql_dialect):
+def test_tables_have_spec_columns_and_primary_keys(mssql_dialect):
     d = mssql_dialect
     with d.engine.connect() as conn:
-        assert set(d.parent_tables(conn, d.cfg.schema)) == PARENTS
-        assert d.parent_tables(conn, d.cfg.raw_schema) == ["resource"]
-    for schema in (d.cfg.raw_schema, d.cfg.schema):
-        assert scalar(d, "SELECT count(*) FROM sys.partition_functions WHERE name = ?", f"pf_{schema}_release") == 1
-    assert scalar(d, "SELECT count(*) FROM sys.views WHERE schema_id = SCHEMA_ID(?)", d.cfg.schema) == len(PARENTS)
-    assert scalar(d, f"SELECT count(*) FROM {d.q(d.cfg.schema, 'v_practitioner')}") == 0
-    assert scalar(d, "SELECT collation_name FROM sys.columns WHERE object_id = OBJECT_ID(?) AND name = 'resource'",
-                  f"{d.cfg.raw_schema}.resource") == "Latin1_General_100_CI_AS_SC_UTF8"
-    assert scalar(d, "SELECT DISTINCT data_compression_desc FROM sys.partitions WHERE object_id = OBJECT_ID(?)",
-                  f"{d.cfg.schema}.practitioner") == "PAGE"
-    assert d.published_releases() == [] and d.partitioned_releases() == set()
-    assert d.is_published(date(2026, 9, 29)) is False
+        for t in ALL_TABLES:
+            cols = [r[0] for r in conn.exec_driver_sql(
+                "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(?) ORDER BY column_id",
+                (f"{d.cfg.schema}.{t.name}",))]
+            assert cols == columns(t), t.name
+            assert conn.exec_driver_sql("SELECT count(*) FROM sys.key_constraints WHERE parent_object_id = OBJECT_ID(?) "
+                                        "AND type = 'PK'", (f"{d.cfg.schema}.{t.name}",)).scalar() == 1, t.name
+            stage_cols = [r[0] for r in conn.exec_driver_sql(
+                "SELECT name FROM sys.columns WHERE object_id = OBJECT_ID(?) ORDER BY column_id",
+                (f"{d.cfg.stage_schema}.{t.name}",))]
+            assert stage_cols == columns(t), f"stage {t.name}"
+    assert scalar(d, "SELECT count(*) FROM sys.tables WHERE schema_id = SCHEMA_ID(?)", d.cfg.stage_schema) == 27
+    assert scalar(d, "SELECT count(*) FROM sys.partition_functions WHERE name LIKE ?", f"pf_{d.cfg.schema}%") == 0
+    assert scalar(d, "SELECT count(*) FROM sys.views WHERE schema_id = SCHEMA_ID(?)", d.cfg.schema) == 26
+    assert scalar(d, "SELECT count(*) FROM sys.objects WHERE schema_id = SCHEMA_ID(?) AND type IN ('FN','IF')",
+                  d.cfg.schema) == 0
+    for col in ("hash", "release_date", "run_id", "last_seen_release", "last_seen_run_id"):
+        assert scalar(d, "SELECT COL_LENGTH(?, ?)", f"{d.cfg.schema}.resource_state", col) is not None
+    assert scalar(d, "SELECT COL_LENGTH(?, 'not_seen_resources')", f"{d.cfg.schema}.release") is not None
 
 
 def test_init_db_is_idempotent(mssql_dialect):
     mssql_dialect.init_db()
     mssql_dialect.init_db()
-
-
-def test_helper_functions(mssql_dialect):
-    d = mssql_dialect
-    s = d.q(d.cfg.schema)
-    res = '{"name": ["A", "B", "C"]}'
-    assert scalar(d, f"SELECT {s}.ref_id('Organization/Organization-1')") == "Organization-1"
-    assert scalar(d, f"SELECT {s}.ref_id(NULL)") is None
-    # ext() and identifier_value() are gone: the transforms parse each document once and look these up inline.
-    assert scalar(d, f"SELECT count(*) FROM sys.objects WHERE schema_id = SCHEMA_ID(?) AND name IN ('ext', "
-                     f"'identifier_value')", d.cfg.schema) == 0
-    assert scalar(d, f"SELECT j.txt FROM {s}.join_text(JSON_QUERY(?, '$.name'), ' ', 0) j", res) == "A B C"
-    assert scalar(d, f"SELECT j.txt FROM {s}.join_text(JSON_QUERY(?, '$.name'), ', ', 2) j", res) == "C"
-    assert scalar(d, f"SELECT j.txt FROM {s}.join_text(NULL, ' ', 0) j") is None
-    assert str(scalar(d, f"SELECT {s}.fhir_ts('2020')")) == "2020-01-01 00:00:00"
-    assert str(scalar(d, f"SELECT {s}.fhir_ts('2020-05')")) == "2020-05-01 00:00:00"
-    assert str(scalar(d, f"SELECT {s}.fhir_ts('2026-09-29T04:34:00.724328Z')")) == "2026-09-29 04:34:00.724000"
-    assert str(scalar(d, f"SELECT {s}.fhir_ts('2026-09-29T01:00:00-05:00')")) == "2026-09-29 06:00:00"

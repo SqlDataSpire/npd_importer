@@ -13,7 +13,7 @@ env_file = 'C:\npd-loader\database.prd.env'
 
 [npd_db]
 connection = "data"           # its type (mssql|postgres) selects the flavor
-raw_schema = "npd_raw"
+stage_schema = "npd_stage"
 schema = "npd"
 lock_timeout_seconds = 30     # publish/retention give up waiting for a table lock after this (3 attempts)
 

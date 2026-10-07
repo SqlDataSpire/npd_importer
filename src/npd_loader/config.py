@@ -30,9 +30,11 @@ class DatabasesConfig:
 @dataclass(frozen=True)
 class NpdDbConfig:
     connection: str
-    raw_schema: str
-    schema: str
-    lock_timeout_seconds: float = 30.0   # how long publish/retention DDL waits for a parent table lock
+    schema: str = "npd"
+    stage_schema: str = "npd_stage"
+    lock_timeout_seconds: float = 30.0   # how long the delta apply waits for a table lock (3 attempts)
+    flatten_workers: int = 4             # parallel .ndjson files being flattened
+    bcp_workers: int = 8                 # parallel bcp loads
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,8 @@ def parse_config(data: dict[str, Any]) -> Config:
     dl = _section(data, "download", required=False)
     ret = _section(data, "retention", required=False)
     _no_legacy(npd, "npd_db")
+    if "raw_schema" in npd:
+        raise ConfigError("[npd_db] raw_schema was replaced by stage_schema (Phase 2 has no raw table)")
     _no_legacy(cat, "catalog")
 
     catalog_known = {"connection", "project", "run_type", "file_set"}
@@ -157,12 +161,8 @@ def parse_config(data: dict[str, Any]) -> Config:
         source=SourceConfig(manifest_url=_req(src, "source", "manifest_url")),
         storage=StorageConfig(backend=_backend(sto, "storage", STORAGE_BACKENDS), root=_req(sto, "storage", "root")),
         databases=DatabasesConfig(env_file=_req(dbs, "databases", "env_file")),
-        npd_db=NpdDbConfig(
-            connection=_req(npd, "npd_db", "connection"),
-            raw_schema=npd.get("raw_schema", "npd_raw"),
-            schema=npd.get("schema", "npd"),
-            **_optional({k: v for k, v in npd.items() if k == "lock_timeout_seconds"}, "npd_db", NpdDbConfig),
-        ),
+        npd_db=NpdDbConfig(connection=_req(npd, "npd_db", "connection"),
+                           **_optional({k: v for k, v in npd.items() if k != "connection"}, "npd_db", NpdDbConfig)),
         catalog=CatalogConfig(
             connection=_req(cat, "catalog", "connection"),
             project=_req(cat, "catalog", "project"),
@@ -173,8 +173,12 @@ def parse_config(data: dict[str, Any]) -> Config:
         download=DownloadConfig(**_optional(dl, "download", DownloadConfig)),
         retention=RetentionConfig(**_optional(ret, "retention", RetentionConfig)),
     )
-    if config.npd_db.raw_schema == config.npd_db.schema:
-        raise ConfigError("[npd_db] raw_schema and schema must differ")
+    if config.npd_db.schema == config.npd_db.stage_schema:
+        raise ConfigError("[npd_db] stage_schema and schema must differ")
+    if config.npd_db.flatten_workers < 1:
+        raise ConfigError("[npd_db] flatten_workers must be at least 1")
+    if config.npd_db.bcp_workers < 1:
+        raise ConfigError("[npd_db] bcp_workers must be at least 1")
     if config.npd_db.lock_timeout_seconds <= 0:
         raise ConfigError("[npd_db] lock_timeout_seconds must be greater than 0")
     if config.retention.keep_releases < 1:

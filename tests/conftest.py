@@ -134,8 +134,9 @@ def mssql_schemas(mssql_engine):
 def mssql_dialect(mssql_engine, mssql_schemas):
     from npd_loader.config import NpdDbConfig
     from npd_loader.dialect.mssql import MssqlDialect
-    raw, data = mssql_schemas("raw", "")
-    d = MssqlDialect(mssql_engine, NpdDbConfig(connection="data", raw_schema=raw, schema=data,
-                                               lock_timeout_seconds=2), sleep=lambda s: None)
+    stage, data = mssql_schemas("stage", "")
+    d = MssqlDialect(mssql_engine, NpdDbConfig(connection="data", schema=data, stage_schema=stage,
+                                               lock_timeout_seconds=2, flatten_workers=1, bcp_workers=4),
+                     sleep=lambda s: None)
     d.init_db()
     return d
