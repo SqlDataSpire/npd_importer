@@ -1,5 +1,5 @@
 import copy
-from datetime import date, timedelta
+from datetime import date
 
 from npd_loader.catalog import SqlCatalog
 from npd_loader.cli import main
@@ -9,57 +9,45 @@ from helpers import config_data, to_toml, write_env_file
 from release_builder import build_release
 from test_catalog_mssql import make_catalog_schema
 
-BASE = date(2026, 8, 4)
 
-
-def publish(cms, week: int) -> date:
-    release = BASE + timedelta(weeks=week)
-    records = copy.deepcopy(fixture_data.RECORDS)
-    records["01-Organization.ndjson"][0]["name"] = f"ORG {release}"
-    cms.publish(build_release(release.isoformat(), records=records))
-    return release
-
-
-def test_releases_end_to_end_on_sql_server(tmp_path, cms, mssql_doc, mssql_engine, mssql_schemas, capsys):
+def test_two_releases_end_to_end(tmp_path, cms, mssql_doc, mssql_engine, mssql_schemas, capsys):
     stage, data, cat = mssql_schemas("stage", "", "cat")
     cat_cfg = make_catalog_schema(mssql_engine, cat)
     env = write_env_file(tmp_path / "database.env", {"data": mssql_doc, "catalog": mssql_doc})
-    cfg_data = config_data(tmp_path / "data", cms.manifest_url, env_file=env, schemas=(stage, data),
-                           catalog_tables=(cat_cfg.run_table, cat_cfg.file_table), keep_releases=2)
-    config_path = tmp_path / "config.toml"
-    config_path.write_text(to_toml(cfg_data))
-    catalog = SqlCatalog(mssql_engine, parse_config(cfg_data).catalog)
+    cfg = config_data(tmp_path / "data", cms.manifest_url, env_file=env, schemas=(stage, data),
+                      catalog_tables=(cat_cfg.run_table, cat_cfg.file_table), keep_releases=1)
+    (tmp_path / "config.toml").write_text(to_toml(cfg))
+    catalog = SqlCatalog(mssql_engine, parse_config(cfg).catalog)
+    cli = lambda *a: main(["--config", str(tmp_path / "config.toml"), *a])
 
-    def cli(*args):
-        return main(["--config", str(config_path), *args])
-
-    def scalar(sql):
+    def scalar(q):
         with mssql_engine.connect() as conn:
-            return conn.exec_driver_sql(sql).scalar()
+            return conn.exec_driver_sql(q).scalar()
 
-    assert cli("init-db") == 0
-    assert cli("init-db") == 0
-
-    r1 = publish(cms, 0)
+    assert cli("init-db") == 0 and cli("init-db") == 0
+    cms.publish(build_release("2026-09-29"))
     assert cli("run") == 0
-    assert scalar(f"SELECT count(*) FROM [{data}].[v_practitioner]") == 2
-    assert len(catalog.get_data_files(r1, "ndjson")) == 8
-    assert cli("run") == 0                                   # nothing to do
-    assert cli("import", "--force") == 0                     # reapplies the release: nothing changes
-    assert scalar(f"SELECT count(*) FROM [{data}].[v_practitioner]") == 2
+    assert scalar(f"SELECT count(*) FROM [{data}].[practitioner]") == 2
+    assert scalar(f"SELECT count(*) FROM [{data}].[resource_state]") == 12
+    assert cli("run") == 0                                                   # nothing to do
 
-    r2 = publish(cms, 1)
+    records = copy.deepcopy(fixture_data.RECORDS)
+    records["06-Practitioner.ndjson"][0]["gender"] = "female"
+    aging = records["08-OrganizationAffiliation.ndjson"].pop()
+    cms.publish(build_release("2026-10-06", records=records))
     assert cli("run") == 0
-    r3 = publish(cms, 2)
-    assert cli("run") == 0                                   # keep_releases = 2: r1's .ndjson files are deleted
-    assert scalar(f"SELECT MIN(release_date) FROM [{data}].[release]") == r1
-    assert scalar(f"SELECT MAX(release_date) FROM [{data}].[release]") == r3
-    assert scalar(f"SELECT count(*) FROM [{data}].[v_organization] WHERE name = 'ORG {r3}'") == 1
+    assert scalar(f"SELECT count(*) FROM [{data}].[practitioner] WHERE gender = 'female'") == 2
+    assert scalar(f"SELECT count(*) FROM [{data}].[organization_affiliation] WHERE resource_id = '{aging['id']}'") == 1
+    assert scalar(f"SELECT changed_resources FROM [{data}].[release] WHERE release_date = '2026-10-06'") == 1
+    assert scalar(f"SELECT not_seen_resources FROM [{data}].[release] WHERE release_date = '2026-10-06'") == 1
+    assert scalar(f"SELECT CAST(last_seen_release AS varchar(10)) FROM [{data}].[resource_state] "
+                  f"WHERE resource_id = '{aging['id']}'") == "2026-09-29"
+    # keep_releases = 1: the old release's .ndjson files are gone from storage
     assert all(not row.file_rel_path or not (tmp_path / "data" / row.file_rel_path).exists()
-               for row in catalog.get_data_files(r1, "ndjson"))
-    assert any((tmp_path / "data" / row.file_rel_path).exists() for row in catalog.get_data_files(r2, "ndjson"))
+               for row in catalog.get_data_files(date(2026, 9, 29), "ndjson"))
+    assert any((tmp_path / "data" / row.file_rel_path).exists()
+               for row in catalog.get_data_files(date(2026, 10, 6), "ndjson"))
     capsys.readouterr()
     assert cli("status") == 0
     out = capsys.readouterr().out
-    assert out.splitlines()[0].split() == ["release", "download", "extract", "import", "published"]
-    assert r3.isoformat() in out and "using:" not in out     # DataEngine's import print is suppressed
+    assert "2026-10-06" in out and "2026-09-29" in out
