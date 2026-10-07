@@ -95,9 +95,12 @@ Exit code 0 means success, nothing to do, or another run holds the lock; anythin
 ## Querying
 
 `npd.v_<table>` views show the current dataset. Every row has `release_date` (the release it came from),
-`ndjson_file_id` and `zst_file_id`, which are `dbo.DATA_FILE.id` values in the catalog. `npd.resource_state` holds one
-row per resource with its hash and `last_seen_release`; a resource whose `last_seen_release` is older than the newest
-release was missing from it.
+`ndjson_file_id` and `zst_file_id`, which are `dbo.DATA_FILE.id` values in the catalog. `npd.resource_state` is the key
+registry: one row per resource with its `resource_key` (`int`, assigned the first time an id is seen as a resource or
+as a reference, never reused), hash and `last_seen_release`; a resource whose `last_seen_release` is older than the
+newest release was missing from it. Data tables use `resource_key` and reference columns are named `<name>_key`; ids
+are stored without their `Type-` prefix. A key whose `hash` is NULL is a referenced id with no data yet (find such
+references with a `LEFT JOIN`).
 
 Flattened code and type columns (e.g. `*_code`, `*_system`, `*_display`) take the first entry only:
 `coding[0]` of a CodeableConcept and `type[0]` where `type` repeats. The full original resource is in the

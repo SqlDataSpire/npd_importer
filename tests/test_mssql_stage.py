@@ -50,7 +50,7 @@ def test_duplicate_ids_name_the_file(mssql_dialect, tmp_path):
     d = mssql_dialect
     storage = LocalStorage(tmp_path / "data")
     line = orjson.dumps(fixture_data.ORG1) + b"\n"
-    with pytest.raises(FlattenError, match="duplicate resource ids: Organization Organization-1336200294") as e:
+    with pytest.raises(FlattenError, match="duplicate resource ids: Organization 1336200294") as e:
         d.stage_release(storage, R, 7, inputs_for(storage, {"01-Organization.ndjson": line * 2}))
     assert e.value.file_id == 500
 

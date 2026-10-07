@@ -17,7 +17,7 @@ from sqlalchemy.exc import DBAPIError
 from npd_loader.config import NpdDbConfig
 from npd_loader.dialect import DeltaResult, LockUnavailable, StageResult
 from npd_loader.dialect.bcp import bcp_in, bcp_target
-from npd_loader.flatten.engine import columns, ref_columns
+from npd_loader.flatten.engine import columns, key_columns, ref_columns
 from npd_loader.flatten.specs import ALL_TABLES, TABLE_TYPES
 from npd_loader.flatten.stagefiles import HASH_COLUMNS, HASH_TABLE, FlattenError, flatten_files
 from npd_loader.sqltext import render, split_batches, sql_scripts
@@ -154,57 +154,88 @@ class MssqlDialect:
     KINDS = {"N": "new", "C": "changed", "U": "unchanged"}
 
     def apply_delta(self, release: date, run_id: int) -> DeltaResult:
-        """Upsert the staged release: replace the rows of changed resources, insert new ones, mark every resource of
-        the release as seen. Resources missing from the release are kept (aging data)."""
+        """Upsert the staged release: give every new id (resource or reference target) a key, replace the rows of
+        changed resources, insert new ones with text ids translated to keys, mark every resource of the release as
+        seen. Resources missing from the release are kept (aging data)."""
         s, schema = self.cfg.stage_schema, self.cfg.schema
         hashes, state = self.q(s, HASH_TABLE), self.q(schema, "resource_state")
+        types = self.q(schema, "resource_type")
         delta = self.q(s, "delta")      # scratch table rebuilt per apply, not one of the fixed staging tables
         # Classifying outside the transaction is safe: the import lock is held, so nothing else changes resource_state.
         with self._autocommit() as conn:
+            type_ids = {n: i for n, i in conn.exec_driver_sql(f"SELECT name, resource_type_id FROM {types}")}
+            unknown = [r[0] for r in conn.exec_driver_sql(
+                f"SELECT DISTINCT resource_type FROM {hashes} h WHERE NOT EXISTS "
+                f"(SELECT 1 FROM {types} t WHERE t.name = h.resource_type)")]
+            if unknown:
+                raise ValueError(f"staged resource types missing from {schema}.resource_type: {unknown}")
             conn.exec_driver_sql(f"DROP TABLE IF EXISTS {delta}")
             conn.exec_driver_sql(
-                f"SELECT h.resource_type, h.resource_id, h.hash, h.last_updated, "
-                f"CAST(CASE WHEN st.resource_id IS NULL THEN 'N' WHEN st.hash <> h.hash THEN 'C' ELSE 'U' END AS char(1)) AS kind "
-                f"INTO {delta} FROM {hashes} h LEFT JOIN {state} st "
-                f"ON st.resource_type = h.resource_type AND st.resource_id = h.resource_id")
-            conn.exec_driver_sql(f"CREATE UNIQUE CLUSTERED INDEX ux_delta ON {delta} (resource_type, resource_id)")
+                f"SELECT t.resource_type_id, h.resource_type, h.resource_id, CONVERT(binary(20), h.hash, 2) AS hash, "
+                f"h.last_updated, CAST(st.resource_key AS int) AS resource_key, "
+                f"CAST(CASE WHEN st.hash IS NULL THEN 'N' WHEN st.hash <> CONVERT(binary(20), h.hash, 2) THEN 'C' "
+                f"ELSE 'U' END AS char(1)) AS kind "
+                f"INTO {delta} FROM {hashes} h JOIN {types} t ON t.name = h.resource_type "
+                f"LEFT JOIN {state} st ON st.resource_type_id = t.resource_type_id AND st.resource_id = h.resource_id")
+            conn.exec_driver_sql(f"CREATE UNIQUE CLUSTERED INDEX ux_delta ON {delta} (resource_type_id, resource_id)")
             kinds: dict[str, dict[str, int]] = {}
             for rtype, kind, n in conn.exec_driver_sql(
                     f"SELECT resource_type, kind, COUNT_BIG(*) FROM {delta} GROUP BY resource_type, kind"):
                 kinds.setdefault(rtype, {"new": 0, "changed": 0, "unchanged": 0, "not_seen": 0})[self.KINDS[kind]] = n
             for rtype, n in conn.exec_driver_sql(
-                    f"SELECT st.resource_type, COUNT_BIG(*) FROM {state} st WHERE NOT EXISTS (SELECT 1 FROM {delta} d "
-                    f"WHERE d.resource_type = st.resource_type AND d.resource_id = st.resource_id) "
-                    f"GROUP BY st.resource_type"):
+                    f"SELECT t.name, COUNT_BIG(*) FROM {state} st JOIN {types} t ON t.resource_type_id = st.resource_type_id "
+                    f"WHERE st.hash IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {delta} d "
+                    f"WHERE d.resource_type_id = st.resource_type_id AND d.resource_id = st.resource_id) GROUP BY t.name"):
                 kinds.setdefault(rtype, {"new": 0, "changed": 0, "unchanged": 0, "not_seen": 0})["not_seen"] = n
 
         def work(conn) -> tuple[dict[str, int], dict[str, int]]:
+            # keys: first the resources of this release, then every id their rows reference
+            conn.exec_driver_sql(f"INSERT INTO {state} (resource_type_id, resource_id) "
+                                 f"SELECT resource_type_id, resource_id FROM {delta} WHERE resource_key IS NULL")
+            conn.exec_driver_sql(f"UPDATE d SET resource_key = st.resource_key FROM {delta} d JOIN {state} st "
+                                 f"ON st.resource_type_id = d.resource_type_id AND st.resource_id = d.resource_id "
+                                 f"WHERE d.resource_key IS NULL")
+            conn.exec_driver_sql(f"CREATE UNIQUE INDEX ux_delta_key ON {delta} (resource_key) INCLUDE (kind)")
+            for t in ALL_TABLES:
+                for col, target in ref_columns(t).items():
+                    c = self.q(col)
+                    conn.exec_driver_sql(
+                        f"INSERT INTO {state} (resource_type_id, resource_id) SELECT DISTINCT {type_ids[target]}, x.{c} "
+                        f"FROM {self.q(s, t.name)} x WHERE x.{c} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {state} st "
+                        f"WHERE st.resource_type_id = {type_ids[target]} AND st.resource_id = x.{c})")
             inserted, replaced = {}, {}
             for t in ALL_TABLES:
                 target, staged = self.q(schema, t.name), self.q(s, t.name)
                 rtype = TABLE_TYPES[t.name]
-                match = "d.resource_type = x.resource_type" if rtype is None else f"d.resource_type = '{rtype}'"
                 replaced[t.name] = conn.exec_driver_sql(
-                    f"DELETE x FROM {target} x JOIN {delta} d ON d.resource_id = x.resource_id AND {match} "
-                    f"AND d.kind = 'C'").rowcount
-                cols = ", ".join(self.q(c) for c in columns(t))
+                    f"DELETE x FROM {target} x JOIN {delta} d ON d.resource_key = x.resource_key "
+                    f"WHERE d.kind = 'C'").rowcount
+                select, joins = ["x.release_date", "d.resource_key", "x.ndjson_file_id", "x.zst_file_id"], []
+                if t.each:
+                    select.append("x.seq")
+                for i, (name, col) in enumerate(t.cols.items()):
+                    if col.target:
+                        a = f"k{i}"
+                        select.append(f"{a}.resource_key")
+                        joins.append(f"LEFT JOIN {state} {a} ON {a}.resource_type_id = {type_ids[col.target]} "
+                                     f"AND {a}.resource_id = x.{self.q(name)}")
+                    else:
+                        select.append(f"x.{self.q(name)}")
+                match = ("d.resource_type = x.resource_type" if rtype is None
+                         else f"d.resource_type_id = {type_ids[rtype]}")
                 inserted[t.name] = conn.exec_driver_sql(
-                    f"INSERT INTO {target} WITH (TABLOCK) ({cols}) SELECT {cols} FROM {staged} x WHERE EXISTS "
-                    f"(SELECT 1 FROM {delta} d WHERE d.resource_id = x.resource_id AND {match} "
-                    f"AND d.kind IN ('N', 'C'))").rowcount
+                    f"INSERT INTO {target} WITH (TABLOCK) ({', '.join(self.q(c) for c in key_columns(t))}) "
+                    f"SELECT {', '.join(select)} FROM {staged} x JOIN {delta} d ON d.resource_id = x.resource_id "
+                    f"AND {match} AND d.kind IN ('N', 'C') {' '.join(joins)}").rowcount
             conn.exec_driver_sql(
-                f"MERGE {state} AS st USING {delta} AS d "
-                f"ON st.resource_type = d.resource_type AND st.resource_id = d.resource_id "
-                f"WHEN MATCHED THEN UPDATE SET "          # MERGE allows one UPDATE branch: CASE keeps unchanged rows
-                f"hash = CASE WHEN d.kind = 'C' THEN d.hash ELSE st.hash END, "
-                f"last_updated = CASE WHEN d.kind = 'C' THEN d.last_updated ELSE st.last_updated END, "
-                f"release_date = CASE WHEN d.kind = 'C' THEN CAST(? AS date) ELSE st.release_date END, "
-                f"run_id = CASE WHEN d.kind = 'C' THEN ? ELSE st.run_id END, "
+                f"UPDATE st SET "
+                f"hash = CASE WHEN d.kind = 'U' THEN st.hash ELSE d.hash END, "
+                f"last_updated = CASE WHEN d.kind = 'U' THEN st.last_updated ELSE d.last_updated END, "
+                f"release_date = CASE WHEN d.kind = 'U' THEN st.release_date ELSE CAST(? AS date) END, "
+                f"run_id = CASE WHEN d.kind = 'U' THEN st.run_id ELSE ? END, "
                 f"last_seen_release = ?, last_seen_run_id = ? "
-                f"WHEN NOT MATCHED THEN INSERT (resource_type, resource_id, hash, last_updated, release_date, run_id, "
-                f"last_seen_release, last_seen_run_id) VALUES (d.resource_type, d.resource_id, d.hash, d.last_updated, "
-                f"?, ?, ?, ?);",
-                (release, run_id, release, run_id, release, run_id, release, run_id))
+                f"FROM {state} st JOIN {delta} d ON d.resource_key = st.resource_key",
+                (release, run_id, release, run_id))
             totals = {k: sum(v[k] for v in kinds.values()) for k in ("new", "changed", "unchanged", "not_seen")}
             conn.exec_driver_sql(
                 f"MERGE {self.q(schema, 'release')} AS t USING (SELECT CAST(? AS date) AS release_date) AS s "
@@ -226,6 +257,11 @@ class MssqlDialect:
                         conn.exec_driver_sql(f"UPDATE STATISTICS {self.q(schema, t.name)}")
                     except Exception as exc:
                         log.warning("UPDATE STATISTICS %s.%s failed: %s", schema, t.name, exc)
+            if any(inserted.values()):
+                try:
+                    conn.exec_driver_sql(f"UPDATE STATISTICS {state}")
+                except Exception as exc:
+                    log.warning("UPDATE STATISTICS %s.resource_state failed: %s", schema, exc)
         return DeltaResult(kinds, inserted, replaced)
 
     def _locked_transaction(self, work: Callable[[Connection], "T"], what: str) -> "T":
