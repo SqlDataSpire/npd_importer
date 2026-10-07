@@ -180,9 +180,8 @@ everywhere; indexes on natural keys (NPI, GUID ids) are Phase 3 refinements.
 - `npd.resource_type (resource_type_id tinyint PK, name varchar(40) UNIQUE)` — the 8 FHIR types (+ any type seen only
   in identifiers is not needed: identifiers belong to their resource).
 - `npd.resource_state` becomes the key registry: `resource_key int IDENTITY` (clustered PK), `resource_type_id tinyint`,
-  `resource_id varchar(128)` = the id **without** its `Type-` prefix, `hash binary(20)` (SHA-1, NULL for placeholders),
-  `last_updated`, `release_date`, `run_id`, `last_seen_release`, `last_seen_run_id` (NULL for placeholders),
-  `is_placeholder bit`; unique index `(resource_type_id, resource_id)` (needed to assign and look up keys — not
+  `resource_id varchar(128)` = the id **without** its `Type-` prefix, `hash binary(20)` (SHA-1, NULL while an id has only been referenced),
+  `last_updated`, `release_date`, `run_id`, `last_seen_release`, `last_seen_run_id` (NULL while an id has only been referenced); unique index `(resource_type_id, resource_id)` (needed to assign and look up keys — not
   deferrable). A resource keeps its key forever; keys are never reused.
 - Every data table: `resource_id` → `resource_key int NOT NULL`; primary keys `(resource_key)` / `(resource_key, seq)`;
   `identifier` → `(resource_key, seq)` and its `resource_type` column is dropped (the key implies it).
@@ -190,12 +189,14 @@ everywhere; indexes on natural keys (NPI, GUID ids) are Phase 3 refinements.
   provided-by/owned-by/administered-by/participating/network organization) → `<name>_key int` referencing
   `resource_state.resource_key` (no FK constraint; loader-maintained).
 
-### Unresolved references: placeholders (proposed default — confirm in review)
+### References to missing data (user decision, 2026-10-07)
 
-A reference whose target was never seen gets a `resource_state` row with `is_placeholder = 1` (key assigned, no hash,
-no data rows). When the real resource later arrives it takes over that key (`is_placeholder = 0`). Reference columns
-are therefore never NULL for a present reference, and orphans are `WHERE is_placeholder = 1`. (Release 2026-09-29 has
-0 unresolved references.)
+References to resources that have no data are allowed and stay as references. Every id gets its key the first time it
+is seen, whether as a resource or as a reference target, so a reference column always holds the target's key. An id
+that has only been referenced so far has a `resource_state` row with `hash`, `last_updated` and `last_seen_*` NULL and
+no data rows; there is no special flag — when the resource's data arrives it simply uses the key it already has.
+References to missing data are found with an ordinary `LEFT JOIN` to the target table (or
+`resource_state.hash IS NULL`). Release 2026-09-29 has none.
 
 ### Pipeline changes
 
@@ -203,8 +204,8 @@ are therefore never NULL for a present reference, and orphans are `WHERE is_plac
   `Type-` prefix stripped by the flattener. Each spec reference column declares its target type.
 - Staging tables are shaped by the specs (text ids); permanent tables by the key schema; `init-db` builds both.
 - `apply_delta`, inside its one transaction: classify by `(resource_type_id, resource_id)` against `resource_state`
-  (a placeholder counts as **new**); insert keys for new resources; insert placeholders for unresolved references;
+  (an id that was only referenced so far counts as **new**); insert keys for new resources and for referenced ids not yet known;
   replace rows of changed resources by `resource_key`; insert rows translating every text id to its key by join;
-  update `resource_state` (hash, last_seen, placeholder flag); write `npd.release`.
+  update `resource_state` (hash, last_seen); write `npd.release`.
 - Phase 3 (refinements, out of scope now): indexes on natural keys — NPI, GUID ids, `identifier(system, value)` — and
   views exposing natural ids for readers.
