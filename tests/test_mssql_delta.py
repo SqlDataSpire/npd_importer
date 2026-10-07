@@ -115,18 +115,18 @@ def test_failure_inside_apply_rolls_back(mssql_dialect, tmp_path):
     records["06-Practitioner.ndjson"].append({**records["06-Practitioner.ndjson"][1], "id": "Practitioner-1999999999"})
     storage = LocalStorage(tmp_path / "data8")
     d.stage_release(storage, R2, 8, inputs_for(storage, build_release(R2.isoformat(), records=records).ndjson))
-    with d._autocommit() as c:                                            # sabotage one staging table
-        c.exec_driver_sql(f"EXEC sp_rename '{d.cfg.stage_schema}.practitioner_role', 'practitioner_role_x'")
+    with d._autocommit() as c:                                            # sabotage a table after practitioner, without references
+        c.exec_driver_sql(f"EXEC sp_rename '{d.cfg.stage_schema}.practitioner_role_telecom', 'practitioner_role_telecom_x'")
     before = rows(d, f"SELECT count(*), max(resource_key) FROM {d.q(d.cfg.schema, 'resource_state')}")
     try:
         try:
             d.apply_delta(R2, 8)
             raise AssertionError("apply_delta should have failed")
         except Exception as exc:
-            assert "practitioner_role" in str(exc)
+            assert "practitioner_role_telecom" in str(exc)
         assert rows(d, f"SELECT gender FROM {d.q(d.cfg.schema, 'practitioner')} ORDER BY resource_key")[0] == ("male",)
         assert [r[0] for r in rows(d, f"SELECT release_date FROM {d.q(d.cfg.schema, 'release')}")] == [R1]
         assert rows(d, f"SELECT count(*), max(resource_key) FROM {d.q(d.cfg.schema, 'resource_state')}") == before
     finally:
         with d._autocommit() as c:
-            c.exec_driver_sql(f"EXEC sp_rename '{d.cfg.stage_schema}.practitioner_role_x', 'practitioner_role'")
+            c.exec_driver_sql(f"EXEC sp_rename '{d.cfg.stage_schema}.practitioner_role_telecom_x', 'practitioner_role_telecom'")
