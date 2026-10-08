@@ -60,12 +60,37 @@ the delete/insert ran); data used 56.1 GB.
 
 ### Why almost everything was "changed"
 
-The change hash covers the raw ndjson line. Sampled 20,000 resources per type across both releases:
-`meta.lastUpdated` differs in **every** resource — it is the CMS export timestamp, not a content change.
-Resources whose only difference is `meta.lastUpdated`: PractitionerRole 100%, OrganizationAffiliation 100%,
-HealthcareService 100%, Organization 95%, Practitioner 72% (real changes there: qualification, telecom). With
-`meta.lastUpdated` excluded from the hash, a weekly apply would touch roughly a tenth of the resources instead of
-all of them. Decision pending (see below).
+The change hash covers the raw ndjson line, and `meta.lastUpdated` is a CMS export batch stamp, not a per-resource
+time. A full comparison of both extracted releases (every resource, not a sample; script
+`E:\npd_dev_data\task12\lu\lu_compare.py`, results in `result.json` there) found:
+
+- Each file carries only 1–8 distinct `lastUpdated` values, one per export batch. For example, all 7,481,907
+  Practitioners in 2026-10-07 carry `2026-10-07T00:50:51.759973Z`. Practitioner, Location, Endpoint,
+  HealthcareService and InsurancePlan have one value; PractitionerRole and OrganizationAffiliation two;
+  Organization eight.
+- Every resource that has a `lastUpdated` got a new one. 20 Organizations (the `Organization-<npi>-part-<n>`
+  records) have no `meta` at all; 5 of them are the 5 "unchanged" resources, and the other 15 had real changes.
+- `meta` contains nothing but `lastUpdated`.
+
+Resources present in both releases, compared with `meta.lastUpdated` removed (fields compared at the top level of
+the resource; one resource can change in several fields):
+
+| type | in both | only `lastUpdated` differs | real change | fields with real changes |
+|---|---|---|---|---|
+| PractitionerRole | 11,036,538 | 10,984,527 | 52,011 | telecom 49,476; endpoint 2,374; period 177; active 104; practitioner 7 |
+| Practitioner | 7,481,906 | 5,881,258 | 1,600,648 | qualification 1,397,691; telecom 215,269; name 41,720; gender 18 |
+| Location | 2,558,069 | 2,049,939 | 508,130 | managingOrganization 429,916; telecom 128,473; position 2 |
+| Organization | 2,058,102 | 1,937,309 | 120,788 (+5 identical) | telecom 106,401; name 21,654; address 15,918; identifier 5,990; endpoint 2,283; partOf 6 |
+| Endpoint | 1,140,564 | 1,140,331 | 233 | managingOrganization 233 |
+| OrganizationAffiliation | 371,605 | 371,605 | 0 | |
+| HealthcareService | 54,445 | 54,445 | 0 | |
+| InsurancePlan | 6,142 | 6,140 | 2 | name 2 |
+| **total** | **24,707,371** | **22,425,554 (90.8%)** | **2,281,812 (9.2%)** | |
+
+New (116,588) and dropped (144,851) counts match the loader's delta exactly. With `meta.lastUpdated` excluded from
+the hash, the 2026-10-07 apply would have rewritten ~2.28 M resources instead of 24.7 M. Not yet checked: whether
+the 1.4 M Practitioner `qualification` and 430 k Location `managingOrganization` changes are real data changes or
+reorderings within the lists.
 
 ## Findings for production sizing
 
