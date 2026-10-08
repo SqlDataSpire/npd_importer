@@ -3,10 +3,10 @@
   "technology_stack": [
     "Python"
   ],
-  "projects_found": 17,
+  "projects_found": 18,
   "folders_found": 5,
-  "components_found": 17,
-  "dependencies_found": 57,
+  "components_found": 18,
+  "dependencies_found": 60,
   "test_projects": [
     "tests"
   ],
@@ -19,13 +19,16 @@
   "output_folder": "C:\\Users\\tliberato\\Documents\\Programming\\nppes_npd_env\\architecture-docs\\nppes_npd_env",
   "c4": {
     "containers": 1,
-    "data_stores": 2,
+    "data_stores": 0,
     "external_systems": 0,
     "diagrams": [
+      "c4-context",
       "c4-container",
-      "c4-component-npd-loader"
+      "c4-component-npd-loader",
+      "c4-flow-daily-run",
+      "c4-flow-publish"
     ],
-    "model": "facts-only",
+    "model": "c4-model.json",
     "model_errors": []
   }
 }

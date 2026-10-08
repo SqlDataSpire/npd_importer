@@ -21,6 +21,7 @@
   ],
   "npd_loader.dialect": [
     "npd_loader.config",
+    "npd_loader.flatten",
     "npd_loader.raw_load",
     "npd_loader.sqltext",
     "npd_loader.storage"
@@ -38,10 +39,14 @@
     "npd_loader.stages",
     "npd_loader.storage"
   ],
+  "npd_loader.flatten": [
+    "npd_loader.raw_load"
+  ],
   "npd_loader.import_stage": [
     "npd_loader.catalog",
     "npd_loader.dialect",
     "npd_loader.extract",
+    "npd_loader.flatten",
     "npd_loader.manifest",
     "npd_loader.raw_load",
     "npd_loader.retention",
@@ -52,7 +57,6 @@
   "npd_loader.profile": [],
   "npd_loader.raw_load": [],
   "npd_loader.retention": [
-    "npd_loader.dialect",
     "npd_loader.stages"
   ],
   "npd_loader.runxml": [],
@@ -73,6 +77,7 @@
     "npd_loader.dialect",
     "npd_loader.download",
     "npd_loader.extract",
+    "npd_loader.flatten",
     "npd_loader.import_stage",
     "npd_loader.manifest",
     "npd_loader.profile",

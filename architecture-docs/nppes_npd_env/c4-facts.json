@@ -40,6 +40,10 @@
             "path": "src/npd_loader/extract.py",
             "group": "src"
           },
+          "npd_loader.flatten": {
+            "path": "src/npd_loader/flatten",
+            "group": "src"
+          },
           "npd_loader.import_stage": {
             "path": "src/npd_loader/import_stage.py",
             "group": "src"
@@ -100,6 +104,7 @@
           ],
           "npd_loader.dialect": [
             "npd_loader.config",
+            "npd_loader.flatten",
             "npd_loader.raw_load",
             "npd_loader.sqltext",
             "npd_loader.storage"
@@ -117,10 +122,14 @@
             "npd_loader.stages",
             "npd_loader.storage"
           ],
+          "npd_loader.flatten": [
+            "npd_loader.raw_load"
+          ],
           "npd_loader.import_stage": [
             "npd_loader.catalog",
             "npd_loader.dialect",
             "npd_loader.extract",
+            "npd_loader.flatten",
             "npd_loader.manifest",
             "npd_loader.raw_load",
             "npd_loader.retention",
@@ -131,7 +140,6 @@
           "npd_loader.profile": [],
           "npd_loader.raw_load": [],
           "npd_loader.retention": [
-            "npd_loader.dialect",
             "npd_loader.stages"
           ],
           "npd_loader.runxml": [],
@@ -151,47 +159,13 @@
         "Python >=3.12",
         "Python-DataEngine>=2.4",
         "zstandard>=0.22",
-        "httpx>=0.27"
+        "httpx>=0.27",
+        "orjson>=3.10"
       ],
       "compose_services": null
     }
   ],
-  "data_stores": [
-    {
-      "id": "db-postgresql",
-      "name": "PostgreSQL",
-      "technology": "PostgreSQL",
-      "evidence": [
-        "src/npd_loader/dialect/postgres.py:21"
-      ],
-      "used_by": [
-        "npd-loader"
-      ],
-      "used_by_components": {
-        "npd-loader": [
-          "npd_loader.dialect"
-        ]
-      },
-      "used_by_code": {}
-    },
-    {
-      "id": "db-sql-server",
-      "name": "SQL Server",
-      "technology": "SQL Server",
-      "evidence": [
-        "src/npd_loader/dialect/mssql.py:10"
-      ],
-      "used_by": [
-        "npd-loader"
-      ],
-      "used_by_components": {
-        "npd-loader": [
-          "npd_loader.dialect"
-        ]
-      },
-      "used_by_code": {}
-    }
-  ],
+  "data_stores": [],
   "external_systems": [],
   "relationships": [],
   "endpoints": [],

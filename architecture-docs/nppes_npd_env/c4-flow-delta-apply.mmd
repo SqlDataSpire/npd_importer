@@ -1,0 +1,14 @@
+sequenceDiagram
+    participant npd_loader_import_stage as npd_loader.import_stage
+    participant npd_loader_dialect as npd_loader.dialect
+    participant db_sql_server as npd database
+    actor data_consumer as Analyst / downstream jobs
+    npd_loader_import_stage->>npd_loader_dialect: apply_delta(release, run_id)
+    npd_loader_dialect->>db_sql_server: Build npd_stage.delta: join resource_hash with resource_state#59; kind N (no hash yet), C (hash differs), U (same) [pyodbc]
+    npd_loader_dialect->>db_sql_server: SET XACT_ABORT, LOCK_TIMEOUT#59; BEGIN TRAN (retry the whole transaction on lock timeout 1222)
+    npd_loader_dialect->>db_sql_server: INSERT resource_state rows for new ids (IDENTITY keys) and for referenced-only ids from N/C rows
+    npd_loader_dialect->>db_sql_server: Per table: DELETE rows of changed resources by resource_key#59; INSERT N/C rows translating text ids to keys
+    npd_loader_dialect->>db_sql_server: UPDATE resource_state (hash, last_updated for N/C#59; last_seen for all seen)#59; MERGE npd.release#59; COMMIT
+    npd_loader_dialect->>db_sql_server: UPDATE STATISTICS
+    data_consumer->>db_sql_server: Readers see the merged release (READ_COMMITTED_SNAPSHOT: old version until COMMIT)
+    Note over db_sql_server: assumption: consumers read the npd tables or v_* views

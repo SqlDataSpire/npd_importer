@@ -10,37 +10,35 @@ status and profile by hand;
 installs and schedules the loader`")
     data_consumer("`**Analyst / downstream jobs**
 [Person]
-Query the published npd tables and
-v_* latest-release views`")
+Query the current merged npd
+tables and v_* views`")
     subgraph boundary["`**npd-loader** [Software System]`"]
         npd_loader["`**npd-loader CLI**
-[Container: Python 3.12, Python-DataEngine (SQLAlchemy + pyodbc / psycopg2), httpx, zstandard]
+[Container: Python 3.12, Python-DataEngine (SQLAlchemy + pyodbc), orjson, bcp.exe, httpx, zstandard]
 Stages download -› extract -›
-import (raw load, T-SQL
-transforms, partition-SWITCH
-publish, retention); commands run,
-download, extract, import, status,
-init-db, profile`"]
+import (Python flatten, bcp into
+staging, one-transaction delta
+apply, .ndjson retention);
+commands run, download, extract,
+import, status, init-db, profile`"]
         db_sql_server[("`**npd database**
 [Container: SQL Server 2019 (cssnpi: npd / npd_dev / npd_test)]
-npd_raw.resource (raw FHIR JSON,
-varchar(max) UTF-8) and 26 npd.*
-tables, partitioned by
-release_date; npd.release; v_*
-views`")]
-        db_postgresql[("`**npd database (Postgres flavor)**
-[Container: PostgreSQL 16]
-Alternative flavor selected by a
-type: postgres connection; same
-schema with JSONB raw layer and
-list partitions (ported to
-DataEngine, not yet verified
-against a server)`")]
+npd.resource_state (surrogate int
+key registry with per-resource
+hash and last seen release), 26
+key-shaped npd.* tables holding
+the current merged dataset,
+npd.resource_type, npd.release,
+v_* views; npd_stage.* fixed text-
+shaped staging tables`")]
         file_storage[("`**Release file store**
 [Container: Local disk (storage backend 'local', e.g. D:\npd or E:\npd_dev_data)]
 Run folders holding the manifest,
-downloaded .ndjson.zst files and
-extracted .ndjson files`")]
+downloaded .ndjson.zst files (the
+backup of every release) and
+extracted .ndjson files, plus
+transient stage/run_‹id› bcp files
+during an import`")]
     end
     catalog_db["`**Warehouse catalog**
 [Software System]
@@ -73,19 +71,15 @@ files from
 files to, reads them back
 for import
 [file I/O]`"| file_storage
-    npd_loader -->|"`Bulk-loads raw JSON, runs
-T-SQL transforms, publishes
-by partition SWITCH
-[pyodbc (SqlConnectionObject)]`"| db_sql_server
-    npd_loader -->|"`Same stages via COPY and
-ATTACH PARTITION (Postgres
-flavor)
-[psycopg2 (PgConnectionObject)]`"| db_postgresql
+    npd_loader -->|"`bcp-loads staging, applies
+the release delta in one
+transaction
+[pyodbc (SqlConnectionObject) + bcp.exe]`"| db_sql_server
     npd_loader -->|"`Records runs and data files
 in
 [SQLAlchemy Core]`"| catalog_db
-    data_consumer -->|"`Queries published release
-tables and v_* views
+    data_consumer -->|"`Queries the current merged
+npd tables and v_* views
 [SQL]`"| db_sql_server
     classDef person fill:#08427b,stroke:#052e56,color:#ffffff
     classDef container fill:#1168bd,stroke:#0b4884,color:#ffffff
@@ -94,6 +88,6 @@ tables and v_* views
     classDef external fill:#999999,stroke:#6b6b6b,color:#ffffff
     classDef shared fill:#dbe9f6,stroke:#5d82a8,color:#000000,stroke-dasharray:4 3
     class operator,data_consumer person
-    class npd_loader,db_sql_server,db_postgresql,file_storage container
+    class npd_loader,db_sql_server,file_storage container
     class catalog_db,cms_npd,task_scheduler external
     style boundary fill:none,stroke:#444444,stroke-dasharray:6 4

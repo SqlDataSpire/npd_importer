@@ -10,18 +10,18 @@ status and profile by hand;
 installs and schedules the loader`")
     data_consumer("`**Analyst / downstream jobs**
 [Person]
-Query the published npd tables and
-v_* latest-release views`")
+Query the current merged npd
+tables and v_* views`")
     system["`**npd-loader**
 [Software System]
 Downloads the CMS National
 Provider Directory FHIR bulk
-release, loads it into SQL Server
-(or Postgres) as raw JSON plus 26
-flattened tables, publishes each
-release atomically and records
-every run and file in the
-warehouse catalog`"]
+release, flattens it in Python
+into 26 tables, merges each
+release into one current dataset
+in SQL Server by per-resource
+hash, and records every run and
+file in the warehouse catalog`"]
     cms_npd["`**CMS National Provider Directory downloads**
 [Software System]
 Publishes the weekly FHIR bulk
@@ -52,8 +52,8 @@ files from
     system -->|"`Records runs and data files
 in
 [SQLAlchemy Core]`"| catalog_db
-    data_consumer -->|"`Queries published release
-tables and v_* views
+    data_consumer -->|"`Queries the current merged
+npd tables and v_* views
 [SQL]`"| system
     classDef person fill:#08427b,stroke:#052e56,color:#ffffff
     classDef container fill:#1168bd,stroke:#0b4884,color:#ffffff

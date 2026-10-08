@@ -8,6 +8,7 @@ graph TD
         npd_loader_dialect["npd_loader.dialect"]
         npd_loader_download["npd_loader.download"]
         npd_loader_extract["npd_loader.extract"]
+        npd_loader_flatten["npd_loader.flatten"]
         npd_loader_import_stage["npd_loader.import_stage"]
         npd_loader_manifest["npd_loader.manifest"]
         npd_loader_profile["npd_loader.profile"]
@@ -32,6 +33,7 @@ graph TD
     npd_loader_cli --> npd_loader_storage
     npd_loader_connections --> npd_loader_config
     npd_loader_dialect --> npd_loader_config
+    npd_loader_dialect --> npd_loader_flatten
     npd_loader_dialect --> npd_loader_raw_load
     npd_loader_dialect --> npd_loader_sqltext
     npd_loader_dialect --> npd_loader_storage
@@ -44,15 +46,16 @@ graph TD
     npd_loader_extract --> npd_loader_runxml
     npd_loader_extract --> npd_loader_stages
     npd_loader_extract --> npd_loader_storage
+    npd_loader_flatten --> npd_loader_raw_load
     npd_loader_import_stage --> npd_loader_catalog
     npd_loader_import_stage --> npd_loader_dialect
     npd_loader_import_stage --> npd_loader_extract
+    npd_loader_import_stage --> npd_loader_flatten
     npd_loader_import_stage --> npd_loader_manifest
     npd_loader_import_stage --> npd_loader_raw_load
     npd_loader_import_stage --> npd_loader_retention
     npd_loader_import_stage --> npd_loader_runxml
     npd_loader_import_stage --> npd_loader_stages
-    npd_loader_retention --> npd_loader_dialect
     npd_loader_retention --> npd_loader_stages
     npd_loader_stages --> npd_loader_catalog
     npd_loader_stages --> npd_loader_config
@@ -66,6 +69,7 @@ graph TD
     tests --> npd_loader_dialect
     tests --> npd_loader_download
     tests --> npd_loader_extract
+    tests --> npd_loader_flatten
     tests --> npd_loader_import_stage
     tests --> npd_loader_manifest
     tests --> npd_loader_profile

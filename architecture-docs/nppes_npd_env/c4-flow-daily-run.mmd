@@ -8,6 +8,7 @@ sequenceDiagram
     participant npd_loader_import_stage as npd_loader.import_stage
     participant npd_loader_extract as npd_loader.extract
     participant npd_loader_dialect as npd_loader.dialect
+    participant npd_loader_flatten as npd_loader.flatten
     participant db_sql_server as npd database
     participant npd_loader_retention as npd_loader.retention
     task_scheduler->>npd_loader_cli: npd-loader --config ... run [npd-loader-run.cmd]
@@ -17,7 +18,11 @@ sequenceDiagram
     npd_loader_download->>catalog_db: DOWNLOAD run + manifest/.zst DATA_FILE rows [SQLAlchemy Core]
     npd_loader_cli->>npd_loader_import_stage: run_import(ctx)
     npd_loader_import_stage->>npd_loader_extract: Extracts missing .ndjson (EXTRACT run)
-    npd_loader_import_stage->>npd_loader_dialect: load_raw -› run_transforms -› publish
-    npd_loader_dialect->>db_sql_server: Raw batches (5,000 rows, committed each), parse-once T-SQL transforms, SPLIT + SWITCH publish in one transaction [pyodbc]
-    npd_loader_import_stage->>npd_loader_retention: apply_retention (keep_releases)
+    npd_loader_import_stage->>npd_loader_dialect: stage_release(storage, release, run_id, inputs)
+    npd_loader_dialect->>npd_loader_flatten: flatten_files: one worker per .ndjson (flatten_workers), rows + hash rows to bcp files
+    npd_loader_flatten->>file_storage: Reads .ndjson, writes stage/run_‹id›/*.bcp
+    npd_loader_dialect->>db_sql_server: TRUNCATE npd_stage.*, bcp in (bcp_workers parallel), check row counts and duplicate ids [bcp.exe]
+    npd_loader_import_stage->>npd_loader_dialect: apply_delta(release, run_id)
+    npd_loader_dialect->>db_sql_server: Classify by hash and merge in one transaction (see delta-apply flow) [pyodbc]
+    npd_loader_import_stage->>npd_loader_retention: apply_retention: delete .ndjson files beyond keep_releases
     npd_loader_import_stage->>catalog_db: IMPORT run Success + per-table row counts#59; DATE_LOADED on .ndjson rows [SQLAlchemy Core]

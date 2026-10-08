@@ -58,6 +58,14 @@
       "duplicate_name": false
     },
     {
+      "name": "npd_loader.flatten",
+      "path": "src/npd_loader/flatten",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
       "name": "npd_loader.import_stage",
       "path": "src/npd_loader/import_stage.py",
       "group": "src",
