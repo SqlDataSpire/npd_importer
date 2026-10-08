@@ -5,7 +5,8 @@ designed yet; each needs its own decision before work starts.
 
 ## Before production
 
-- Turn on `READ_COMMITTED_SNAPSHOT` on the production `npd` database, and size tempdb for one apply's version store.
+- `READ_COMMITTED_SNAPSHOT` is already ON in the production `npd` database (checked 2026-10-08; it is still empty).
+  Size tempdb for one apply's version store.
   The first weekly update, with the old hash, used ~28 GB of version store and 205 GB of log. A first load used
   ~66 GB of log.
 - Find out whether anything outside the loader reads the Phase 1 `npd.v_*` views in production. They are removed
