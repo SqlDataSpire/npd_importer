@@ -6,7 +6,7 @@ from npd_loader.flatten.engine import E, R, Table, ext, identifier, official_nam
 
 # Bump whenever a spec change must reach existing rows: it is part of every resource hash, so the next import classifies
 # every resource as changed and rewrites it.
-SPEC_VERSION = 1
+SPEC_VERSION = 2
 
 NDH = "http://hl7.org/fhir/us/ndh/StructureDefinition/"
 NPI = ("http://terminology.hl7.org/NamingSystem/npi", "http://hl7.org/fhir/sid/us-npi")

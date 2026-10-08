@@ -209,3 +209,18 @@ References to missing data are found with an ordinary `LEFT JOIN` to the target 
   update `resource_state` (hash, last_seen); write `npd.release`.
 - Phase 3 (refinements, out of scope now): indexes on natural keys — NPI, GUID ids, `identifier(system, value)` — and
   views exposing natural ids for readers.
+
+## Revision 2026-10-08: hash excludes `meta.lastUpdated` (user decision)
+
+Replaces P2. The first weekly update (release 2026-10-07) classified 24.7 M of 24.7 M resources as changed: CMS
+stamps `meta.lastUpdated` per export batch, so it differs in every resource every release, while only 9.2% had a
+real content change (`docs/profile/2026-10-08-phase2-dev-import.md`).
+
+- Hash basis: SHA-1 of `SPEC_VERSION\n` + `orjson.dumps` of the parsed resource with `meta.lastUpdated` removed
+  (and `meta` removed when nothing else is left in it). Key order is kept as received, so a CMS key-order change
+  still shows as "changed" once.
+- `SPEC_VERSION` goes to 2, so the first import after this change rewrites every resource once.
+- `last_updated` (in `resource_state` and the parent tables) is still read from `meta.lastUpdated`. An unchanged
+  resource keeps the value from the release in which its content last changed.
+- Kept: flattening and bcp of every resource, so the hash comparison happens in SQL against the full staged release.
+  Moving classification before bcp, and replacing the weekly `last_seen` update, are Phase 3 refinements.

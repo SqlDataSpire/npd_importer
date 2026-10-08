@@ -88,6 +88,15 @@ class _Writer:
             self._fh = None
 
 
+def resource_hash(res: dict) -> str:
+    """SHA-1 of SPEC_VERSION + the resource without meta.lastUpdated (CMS restamps it on every export batch)."""
+    meta = res.get("meta")
+    if isinstance(meta, dict) and "lastUpdated" in meta:
+        rest = {k: v for k, v in meta.items() if k != "lastUpdated"}
+        res = {k: v for k, v in res.items() if k != "meta"} if not rest else {**res, "meta": rest}
+    return hashlib.sha1(f"{SPEC_VERSION}\n".encode() + orjson.dumps(res)).hexdigest()
+
+
 def flatten_file(inp: NdjsonInput, src_path: str, release: str, out_dir: str,
                  chunk_rows: int = 500_000) -> FlattenResult:
     os.makedirs(out_dir, exist_ok=True)
@@ -116,8 +125,7 @@ def flatten_file(inp: NdjsonInput, src_path: str, release: str, out_dir: str,
                 try:
                     for table, values in flatten_resource(res, tables, (release, rid, inp.file_id, inp.zst_file_id)):
                         writers[table].write(values)
-                    writers[HASH_TABLE].write((inp.resource_type, rid, hashlib.sha1(f"{SPEC_VERSION}\n".encode()
-                                                                  + text.encode("utf-8")).hexdigest(),
+                    writers[HASH_TABLE].write((inp.resource_type, rid, resource_hash(res),
                                                instant((res.get("meta") or {}).get("lastUpdated")), release,
                                                inp.file_id, number))
                 except ConvertError as exc:

@@ -46,7 +46,7 @@ IF OBJECT_ID(<<s:schema>> + N'.resource_state', N'U') IS NULL
         resource_key      int          IDENTITY(1, 1) NOT NULL CONSTRAINT pk_resource_state PRIMARY KEY CLUSTERED,
         resource_type_id  tinyint      NOT NULL,
         resource_id       varchar(128) COLLATE Latin1_General_100_BIN2 NOT NULL,   -- natural id without its 'Type-' prefix
-        hash              binary(20)   NULL,       -- SHA-1 of SPEC_VERSION + the ndjson line
+        hash              binary(20)   NULL,       -- SHA-1 of SPEC_VERSION + the resource without meta.lastUpdated
         last_updated      datetime2(3) NULL,
         release_date      date         NULL,       -- release whose content is current
         run_id            int          NULL,

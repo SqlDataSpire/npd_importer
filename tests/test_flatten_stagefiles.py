@@ -83,3 +83,35 @@ def test_flatten_files_without_inputs_is_empty(tmp_path):
     from datetime import date
     res = flatten_files([], LocalStorage(tmp_path), date(2026, 9, 29), str(tmp_path / "out"), 4)
     assert res.files == [] and res.rows == {} and res.resources == {}
+
+
+def _hash_of(tmp_path, res, tag):
+    inp, src = write(tmp_path, "01-Organization.ndjson", orjson.dumps(res) + b"\n")
+    out = flatten_file(inp, src, "2026-09-29", str(tmp_path / f"out{tag}"))
+    return read_rows([f for f in out.files if f.table == "resource_hash"][0].path)[0], out
+
+
+def test_hash_ignores_meta_last_updated(tmp_path):
+    org = fixture_data.ORG1
+    a, _ = _hash_of(tmp_path, org, "a")
+    b, _ = _hash_of(tmp_path, {**org, "meta": {"lastUpdated": "2026-10-06T01:02:03.000000Z"}}, "b")
+    assert a[2] == b[2] and a[3] != b[3]                             # same hash, but last_updated still recorded
+    c, _ = _hash_of(tmp_path, {**org, "name": "Another name"}, "c")
+    assert c[2] != a[2]
+
+
+def test_hash_drops_meta_only_when_empty(tmp_path):
+    org = fixture_data.ORG1
+    bare = {k: v for k, v in org.items() if k != "meta"}
+    a, _ = _hash_of(tmp_path, bare, "a")
+    b, _ = _hash_of(tmp_path, org, "b")
+    assert a[2] == b[2]
+    c, _ = _hash_of(tmp_path, {**org, "meta": {**org["meta"], "versionId": "1"}}, "c")
+    assert c[2] != a[2]
+
+
+def test_last_updated_survives_hashing(tmp_path):
+    h, out = _hash_of(tmp_path, fixture_data.ORG1, "a")
+    assert h[3] == "2026-09-29 04:29:05.411"
+    org_row = read_rows([f for f in out.files if f.table == "organization"][0].path)[0]
+    assert "2026-09-29 04:29:05.411" in org_row
