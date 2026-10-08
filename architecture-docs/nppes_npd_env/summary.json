@@ -26,7 +26,7 @@
       "c4-container",
       "c4-component-npd-loader",
       "c4-flow-daily-run",
-      "c4-flow-publish"
+      "c4-flow-delta-apply"
     ],
     "model": "c4-model.json",
     "model_errors": []
