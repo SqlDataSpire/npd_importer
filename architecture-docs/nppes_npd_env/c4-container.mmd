@@ -1,0 +1,99 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+    operator("`**Data engineer / operator**
+[Person]
+Runs init-db, import --force,
+status and profile by hand;
+installs and schedules the loader`")
+    data_consumer("`**Analyst / downstream jobs**
+[Person]
+Query the published npd tables and
+v_* latest-release views`")
+    subgraph boundary["`**npd-loader** [Software System]`"]
+        npd_loader["`**npd-loader CLI**
+[Container: Python 3.12, Python-DataEngine (SQLAlchemy + pyodbc / psycopg2), httpx, zstandard]
+Stages download -› extract -›
+import (raw load, T-SQL
+transforms, partition-SWITCH
+publish, retention); commands run,
+download, extract, import, status,
+init-db, profile`"]
+        db_sql_server[("`**npd database**
+[Container: SQL Server 2019 (cssnpi: npd / npd_dev / npd_test)]
+npd_raw.resource (raw FHIR JSON,
+varchar(max) UTF-8) and 26 npd.*
+tables, partitioned by
+release_date; npd.release; v_*
+views`")]
+        db_postgresql[("`**npd database (Postgres flavor)**
+[Container: PostgreSQL 16]
+Alternative flavor selected by a
+type: postgres connection; same
+schema with JSONB raw layer and
+list partitions (ported to
+DataEngine, not yet verified
+against a server)`")]
+        file_storage[("`**Release file store**
+[Container: Local disk (storage backend 'local', e.g. D:\npd or E:\npd_dev_data)]
+Run folders holding the manifest,
+downloaded .ndjson.zst files and
+extracted .ndjson files`")]
+    end
+    catalog_db["`**Warehouse catalog**
+[Software System]
+Shared run and file tracking:
+dbo.MASTER_WAREHOUSE_RUN (one row
+per DOWNLOAD/EXTRACT/IMPORT run)
+and dbo.DATA_FILE (manifest, .zst,
+.ndjson files)`"]
+    cms_npd["`**CMS National Provider Directory downloads**
+[Software System]
+Publishes the weekly FHIR bulk
+release: manifest.json plus one
+.ndjson.zst per resource type,
+served through signed redirect
+URLs`"]
+    task_scheduler["`**Windows Task Scheduler**
+[Software System]
+Starts 'npd-loader run' daily
+through scripts/npd-loader-
+run.cmd, which appends the log`"]
+    task_scheduler -->|"`Starts 'run' daily
+[scripts/npd-loader-run.cmd]`"| npd_loader
+    operator -->|"`Runs init-db, import,
+status, profile
+[CLI]`"| npd_loader
+    npd_loader -->|"`Fetches manifest and release
+files from
+[HTTPS (httpx)]`"| cms_npd
+    npd_loader -->|"`Writes .zst and .ndjson
+files to, reads them back
+for import
+[file I/O]`"| file_storage
+    npd_loader -->|"`Bulk-loads raw JSON, runs
+T-SQL transforms, publishes
+by partition SWITCH
+[pyodbc (SqlConnectionObject)]`"| db_sql_server
+    npd_loader -->|"`Same stages via COPY and
+ATTACH PARTITION (Postgres
+flavor)
+[psycopg2 (PgConnectionObject)]`"| db_postgresql
+    npd_loader -->|"`Records runs and data files
+in
+[SQLAlchemy Core]`"| catalog_db
+    data_consumer -->|"`Queries published release
+tables and v_* views
+[SQL]`"| db_sql_server
+    classDef person fill:#08427b,stroke:#052e56,color:#ffffff
+    classDef container fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef system fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef component fill:#85bbf0,stroke:#5d82a8,color:#000000
+    classDef external fill:#999999,stroke:#6b6b6b,color:#ffffff
+    classDef shared fill:#dbe9f6,stroke:#5d82a8,color:#000000,stroke-dasharray:4 3
+    class operator,data_consumer person
+    class npd_loader,db_sql_server,db_postgresql,file_storage container
+    class catalog_db,cms_npd,task_scheduler external
+    style boundary fill:none,stroke:#444444,stroke-dasharray:6 4

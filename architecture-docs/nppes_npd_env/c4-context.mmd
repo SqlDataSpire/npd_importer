@@ -1,0 +1,66 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+    operator("`**Data engineer / operator**
+[Person]
+Runs init-db, import --force,
+status and profile by hand;
+installs and schedules the loader`")
+    data_consumer("`**Analyst / downstream jobs**
+[Person]
+Query the published npd tables and
+v_* latest-release views`")
+    system["`**npd-loader**
+[Software System]
+Downloads the CMS National
+Provider Directory FHIR bulk
+release, loads it into SQL Server
+(or Postgres) as raw JSON plus 26
+flattened tables, publishes each
+release atomically and records
+every run and file in the
+warehouse catalog`"]
+    cms_npd["`**CMS National Provider Directory downloads**
+[Software System]
+Publishes the weekly FHIR bulk
+release: manifest.json plus one
+.ndjson.zst per resource type,
+served through signed redirect
+URLs`"]
+    task_scheduler["`**Windows Task Scheduler**
+[Software System]
+Starts 'npd-loader run' daily
+through scripts/npd-loader-
+run.cmd, which appends the log`"]
+    catalog_db["`**Warehouse catalog**
+[Software System]
+Shared run and file tracking:
+dbo.MASTER_WAREHOUSE_RUN (one row
+per DOWNLOAD/EXTRACT/IMPORT run)
+and dbo.DATA_FILE (manifest, .zst,
+.ndjson files)`"]
+    task_scheduler -->|"`Starts 'run' daily
+[scripts/npd-loader-run.cmd]`"| system
+    operator -->|"`Runs init-db, import,
+status, profile
+[CLI]`"| system
+    system -->|"`Fetches manifest and release
+files from
+[HTTPS (httpx)]`"| cms_npd
+    system -->|"`Records runs and data files
+in
+[SQLAlchemy Core]`"| catalog_db
+    data_consumer -->|"`Queries published release
+tables and v_* views
+[SQL]`"| system
+    classDef person fill:#08427b,stroke:#052e56,color:#ffffff
+    classDef container fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef system fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef component fill:#85bbf0,stroke:#5d82a8,color:#000000
+    classDef external fill:#999999,stroke:#6b6b6b,color:#ffffff
+    classDef shared fill:#dbe9f6,stroke:#5d82a8,color:#000000,stroke-dasharray:4 3
+    class operator,data_consumer person
+    class system system
+    class cms_npd,task_scheduler,catalog_db external

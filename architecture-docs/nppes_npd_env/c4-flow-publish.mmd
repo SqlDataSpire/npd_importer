@@ -1,0 +1,13 @@
+sequenceDiagram
+    participant npd_loader_import_stage as npd_loader.import_stage
+    participant npd_loader_dialect as npd_loader.dialect
+    participant db_sql_server as npd database
+    actor data_consumer as Analyst / downstream jobs
+    npd_loader_import_stage->>npd_loader_dialect: publish(raw_table, tables, release, run_id, force)
+    npd_loader_dialect->>db_sql_server: SET LOCK_TIMEOUT#59; BEGIN TRAN [pyodbc]
+    npd_loader_dialect->>db_sql_server: ALTER PARTITION FUNCTION ... SPLIT RANGE (release) for both schemas
+    npd_loader_dialect->>db_sql_server: ALTER TABLE ‹standalone› SWITCH TO ‹parent› PARTITION n for 27 tables#59; DROP the empties
+    npd_loader_dialect->>db_sql_server: MERGE npd.release#59; COMMIT (retry whole transaction on lock timeout 1222)
+    npd_loader_dialect->>db_sql_server: UPDATE STATISTICS (best effort)
+    data_consumer->>db_sql_server: v_* views now show the new release
+    Note over db_sql_server: assumption: consumers read via the views

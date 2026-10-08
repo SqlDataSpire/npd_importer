@@ -1,0 +1,31 @@
+{
+  "repository": "nppes_npd_env",
+  "technology_stack": [
+    "Python"
+  ],
+  "projects_found": 17,
+  "folders_found": 5,
+  "components_found": 17,
+  "dependencies_found": 57,
+  "test_projects": [
+    "tests"
+  ],
+  "orphan_projects": [],
+  "duplicate_project_names": [],
+  "unresolved_references": [],
+  "cycles": [],
+  "untested_projects": [],
+  "dependency_graph_available": true,
+  "output_folder": "C:\\Users\\tliberato\\Documents\\Programming\\nppes_npd_env\\architecture-docs\\nppes_npd_env",
+  "c4": {
+    "containers": 1,
+    "data_stores": 2,
+    "external_systems": 0,
+    "diagrams": [
+      "c4-container",
+      "c4-component-npd-loader"
+    ],
+    "model": "facts-only",
+    "model_errors": []
+  }
+}

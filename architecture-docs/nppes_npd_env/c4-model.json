@@ -1,0 +1,141 @@
+{
+  "system": {
+    "name": "npd-loader",
+    "description": "Downloads the CMS National Provider Directory FHIR bulk release, loads it into SQL Server (or Postgres) as raw JSON plus 26 flattened tables, publishes each release atomically and records every run and file in the warehouse catalog"
+  },
+  "people": [
+    {
+      "id": "operator",
+      "name": "Data engineer / operator",
+      "description": "Runs init-db, import --force, status and profile by hand; installs and schedules the loader",
+      "evidence": ["README.md:37"]
+    },
+    {
+      "id": "data-consumer",
+      "name": "Analyst / downstream jobs",
+      "description": "Query the published npd tables and v_* latest-release views",
+      "assumption": true
+    }
+  ],
+  "containers": [
+    {
+      "id": "npd-loader",
+      "name": "npd-loader CLI",
+      "technology": "Python 3.12, Python-DataEngine (SQLAlchemy + pyodbc / psycopg2), httpx, zstandard",
+      "description": "Stages download -> extract -> import (raw load, T-SQL transforms, partition-SWITCH publish, retention); commands run, download, extract, import, status, init-db, profile",
+      "evidence": ["pyproject.toml", "src/npd_loader/cli.py:101"]
+    },
+    {
+      "id": "db-sql-server",
+      "name": "npd database",
+      "technology": "SQL Server 2019 (cssnpi: npd / npd_dev / npd_test)",
+      "type": "database",
+      "description": "npd_raw.resource (raw FHIR JSON, varchar(max) UTF-8) and 26 npd.* tables, partitioned by release_date; npd.release; v_* views",
+      "evidence": ["src/npd_loader/dialect/mssql.py:10", "src/npd_loader/sql/mssql/init/002_raw.sql", "database.prd.env:1"]
+    },
+    {
+      "id": "db-postgresql",
+      "name": "npd database (Postgres flavor)",
+      "technology": "PostgreSQL 16",
+      "type": "database",
+      "description": "Alternative flavor selected by a type: postgres connection; same schema with JSONB raw layer and list partitions (ported to DataEngine, not yet verified against a server)",
+      "evidence": ["src/npd_loader/dialect/postgres.py:21"]
+    },
+    {
+      "id": "catalog-db",
+      "name": "Warehouse catalog",
+      "technology": "SQL Server (HIE_WAREHOUSE_META / HIE_WAREHOUSE_META_DEV)",
+      "type": "database",
+      "external": true,
+      "description": "Shared run and file tracking: dbo.MASTER_WAREHOUSE_RUN (one row per DOWNLOAD/EXTRACT/IMPORT run) and dbo.DATA_FILE (manifest, .zst, .ndjson files)",
+      "evidence": ["database.prd.env:1", "config.example.toml:22", "src/npd_loader/catalog.py:92"]
+    },
+    {
+      "id": "file-storage",
+      "name": "Release file store",
+      "technology": "Local disk (storage backend 'local', e.g. D:\\npd or E:\\npd_dev_data)",
+      "type": "database",
+      "description": "Run folders holding the manifest, downloaded .ndjson.zst files and extracted .ndjson files",
+      "evidence": ["config.example.toml:9", "src/npd_loader/storage.py:21"]
+    }
+  ],
+  "external_systems": [
+    {
+      "id": "cms-npd",
+      "name": "CMS National Provider Directory downloads",
+      "description": "Publishes the weekly FHIR bulk release: manifest.json plus one .ndjson.zst per resource type, served through signed redirect URLs",
+      "evidence": ["config.example.toml:5", "src/npd_loader/download.py:111"]
+    },
+    {
+      "id": "task-scheduler",
+      "name": "Windows Task Scheduler",
+      "description": "Starts `npd-loader run` daily through scripts/npd-loader-run.cmd, which appends the log",
+      "evidence": ["README.md:41"]
+    }
+  ],
+  "relationships": [
+    { "from": "task-scheduler", "to": "npd-loader", "description": "Starts `run` daily", "technology": "scripts/npd-loader-run.cmd" },
+    { "from": "operator", "to": "npd-loader", "description": "Runs init-db, import, status, profile", "technology": "CLI" },
+    { "from": "npd-loader", "to": "cms-npd", "description": "Fetches manifest and release files from", "technology": "HTTPS (httpx)" },
+    { "from": "npd-loader", "to": "file-storage", "description": "Writes .zst and .ndjson files to, reads them back for import", "technology": "file I/O" },
+    { "from": "npd-loader", "to": "db-sql-server", "description": "Bulk-loads raw JSON, runs T-SQL transforms, publishes by partition SWITCH", "technology": "pyodbc (SqlConnectionObject)" },
+    { "from": "npd-loader", "to": "db-postgresql", "description": "Same stages via COPY and ATTACH PARTITION (Postgres flavor)", "technology": "psycopg2 (PgConnectionObject)" },
+    { "from": "npd-loader", "to": "catalog-db", "description": "Records runs and data files in", "technology": "SQLAlchemy Core" },
+    { "from": "data-consumer", "to": "db-sql-server", "description": "Queries published release tables and v_* views", "technology": "SQL", "assumption": true }
+  ],
+  "components": {
+    "npd-loader": {
+      "npd_loader.cli": "Entry point: parses commands, builds the stage Context (dialect, catalog, storage, HTTP client), maps outcomes to exit codes",
+      "npd_loader.config": "Parses config.toml into typed sections; rejects legacy host/user/password keys",
+      "npd_loader.connections": "Reads the DataEngine database.env and builds SqlConnectionObject / PgConnectionObject by name",
+      "npd_loader.stages": "Shared stage plumbing: Context, run lock hook, run folders, failure recording, closing interrupted runs",
+      "npd_loader.download": "DOWNLOAD stage: manifest, signed-URL fetch with retries, sha256, data_file rows",
+      "npd_loader.manifest": "Parses manifest.json and maps file names to FHIR resource types",
+      "npd_loader.extract": "EXTRACT stage: .zst -> .ndjson, restores deleted files in place",
+      "npd_loader.import_stage": "IMPORT stage: finds inputs, drops orphans, raw load -> transforms -> publish, marks files loaded",
+      "npd_loader.raw_load": "Shared NDJSON line reader and validator (JSON object, resourceType, id, lastUpdated)",
+      "npd_loader.dialect": "Engine-specific operations behind one protocol: init-db, raw load, transforms, publish, retention drops, run lock, orphan cleanup (mssql.py, postgres.py)",
+      "npd_loader.sqltext": "SQL token rendering, GO batch splitting, standalone table names, packaged SQL scripts",
+      "npd_loader.retention": "Keeps the newest keep_releases published releases; drops older partitions and their .ndjson files",
+      "npd_loader.catalog": "SqlCatalog on SQLAlchemy Core over MASTER_WAREHOUSE_RUN / DATA_FILE (both engines)",
+      "npd_loader.runxml": "Builds xml_config / xml_output for catalog runs",
+      "npd_loader.storage": "LocalStorage: atomic writes, reads, sizes and deletes under the storage root",
+      "npd_loader.profile": "`profile` command: lists JSON paths in a release file and flags unmapped ones"
+    }
+  },
+  "flows": [
+    {
+      "id": "daily-run",
+      "name": "Scheduled daily run (download, extract, import)",
+      "description": "From Task Scheduler to a published release; the import extracts first if .ndjson files are missing.",
+      "steps": [
+        { "from": "task-scheduler", "to": "npd_loader.cli", "description": "npd-loader --config ... run", "technology": "npd-loader-run.cmd" },
+        { "from": "npd_loader.cli", "to": "npd_loader.download", "description": "run_download(ctx)" },
+        { "from": "npd_loader.download", "to": "cms-npd", "description": "GET manifest.json, then each .ndjson.zst via signed URL", "technology": "HTTPS" },
+        { "from": "npd_loader.download", "to": "file-storage", "description": "Writes files into run_<id>_<timestamp>/" },
+        { "from": "npd_loader.download", "to": "catalog-db", "description": "DOWNLOAD run + manifest/.zst DATA_FILE rows", "technology": "SQLAlchemy Core" },
+        { "from": "npd_loader.cli", "to": "npd_loader.import_stage", "description": "run_import(ctx)" },
+        { "from": "npd_loader.import_stage", "to": "npd_loader.extract", "description": "Extracts missing .ndjson (EXTRACT run)" },
+        { "from": "npd_loader.import_stage", "to": "npd_loader.dialect", "description": "load_raw -> run_transforms -> publish" },
+        { "from": "npd_loader.dialect", "to": "db-sql-server", "description": "Raw batches (5,000 rows, committed each), parse-once T-SQL transforms, SPLIT + SWITCH publish in one transaction", "technology": "pyodbc" },
+        { "from": "npd_loader.import_stage", "to": "npd_loader.retention", "description": "apply_retention (keep_releases)" },
+        { "from": "npd_loader.import_stage", "to": "catalog-db", "description": "IMPORT run Success + per-table row counts; DATE_LOADED on .ndjson rows", "technology": "SQLAlchemy Core" }
+      ]
+    },
+    {
+      "id": "publish",
+      "name": "Atomic publish of a release (SQL Server)",
+      "description": "Standalone per-release tables become visible to readers in one metadata-only transaction.",
+      "steps": [
+        { "from": "npd_loader.import_stage", "to": "npd_loader.dialect", "description": "publish(raw_table, tables, release, run_id, force)" },
+        { "from": "npd_loader.dialect", "to": "db-sql-server", "description": "SET LOCK_TIMEOUT; BEGIN TRAN", "technology": "pyodbc" },
+        { "from": "npd_loader.dialect", "to": "db-sql-server", "description": "ALTER PARTITION FUNCTION ... SPLIT RANGE (release) for both schemas" },
+        { "from": "npd_loader.dialect", "to": "db-sql-server", "description": "ALTER TABLE <standalone> SWITCH TO <parent> PARTITION n for 27 tables; DROP the empties" },
+        { "from": "npd_loader.dialect", "to": "db-sql-server", "description": "MERGE npd.release; COMMIT (retry whole transaction on lock timeout 1222)" },
+        { "from": "npd_loader.dialect", "to": "db-sql-server", "description": "UPDATE STATISTICS (best effort)" },
+        { "from": "data-consumer", "to": "db-sql-server", "description": "v_* views now show the new release", "note": "assumption: consumers read via the views" }
+      ]
+    }
+  ],
+  "excluded": []
+}

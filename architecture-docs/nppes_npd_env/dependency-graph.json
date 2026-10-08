@@ -1,0 +1,86 @@
+{
+  "npd_loader.catalog": [
+    "npd_loader.config",
+    "npd_loader.runxml"
+  ],
+  "npd_loader.cli": [
+    "npd_loader.catalog",
+    "npd_loader.config",
+    "npd_loader.connections",
+    "npd_loader.dialect",
+    "npd_loader.download",
+    "npd_loader.extract",
+    "npd_loader.import_stage",
+    "npd_loader.profile",
+    "npd_loader.stages",
+    "npd_loader.storage"
+  ],
+  "npd_loader.config": [],
+  "npd_loader.connections": [
+    "npd_loader.config"
+  ],
+  "npd_loader.dialect": [
+    "npd_loader.config",
+    "npd_loader.raw_load",
+    "npd_loader.sqltext",
+    "npd_loader.storage"
+  ],
+  "npd_loader.download": [
+    "npd_loader.catalog",
+    "npd_loader.manifest",
+    "npd_loader.runxml",
+    "npd_loader.stages"
+  ],
+  "npd_loader.extract": [
+    "npd_loader.catalog",
+    "npd_loader.manifest",
+    "npd_loader.runxml",
+    "npd_loader.stages",
+    "npd_loader.storage"
+  ],
+  "npd_loader.import_stage": [
+    "npd_loader.catalog",
+    "npd_loader.dialect",
+    "npd_loader.extract",
+    "npd_loader.manifest",
+    "npd_loader.raw_load",
+    "npd_loader.retention",
+    "npd_loader.runxml",
+    "npd_loader.stages"
+  ],
+  "npd_loader.manifest": [],
+  "npd_loader.profile": [],
+  "npd_loader.raw_load": [],
+  "npd_loader.retention": [
+    "npd_loader.dialect",
+    "npd_loader.stages"
+  ],
+  "npd_loader.runxml": [],
+  "npd_loader.sqltext": [],
+  "npd_loader.stages": [
+    "npd_loader.catalog",
+    "npd_loader.config",
+    "npd_loader.dialect",
+    "npd_loader.runxml",
+    "npd_loader.storage"
+  ],
+  "npd_loader.storage": [],
+  "tests": [
+    "npd_loader.catalog",
+    "npd_loader.cli",
+    "npd_loader.config",
+    "npd_loader.connections",
+    "npd_loader.dialect",
+    "npd_loader.download",
+    "npd_loader.extract",
+    "npd_loader.import_stage",
+    "npd_loader.manifest",
+    "npd_loader.profile",
+    "npd_loader.raw_load",
+    "npd_loader.retention",
+    "npd_loader.runxml",
+    "npd_loader.sqltext",
+    "npd_loader.stages",
+    "npd_loader.storage"
+  ]
+}

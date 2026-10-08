@@ -1,0 +1,150 @@
+{
+  "solutions": [],
+  "projects": [
+    {
+      "name": "npd_loader.catalog",
+      "path": "src/npd_loader/catalog.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.cli",
+      "path": "src/npd_loader/cli.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.config",
+      "path": "src/npd_loader/config.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.connections",
+      "path": "src/npd_loader/connections.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.dialect",
+      "path": "src/npd_loader/dialect",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.download",
+      "path": "src/npd_loader/download.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.extract",
+      "path": "src/npd_loader/extract.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.import_stage",
+      "path": "src/npd_loader/import_stage.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.manifest",
+      "path": "src/npd_loader/manifest.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.profile",
+      "path": "src/npd_loader/profile.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.raw_load",
+      "path": "src/npd_loader/raw_load.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.retention",
+      "path": "src/npd_loader/retention.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.runxml",
+      "path": "src/npd_loader/runxml.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.sqltext",
+      "path": "src/npd_loader/sqltext.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.stages",
+      "path": "src/npd_loader/stages.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "npd_loader.storage",
+      "path": "src/npd_loader/storage.py",
+      "group": "src",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    },
+    {
+      "name": "tests",
+      "path": "tests",
+      "group": "",
+      "ecosystem": "Python",
+      "in_solution": null,
+      "duplicate_name": false
+    }
+  ],
+  "orphan_projects": [],
+  "duplicate_project_names": [],
+  "folders": [
+    "architecture-docs",
+    "docs",
+    "scripts",
+    "src",
+    "tests"
+  ]
+}

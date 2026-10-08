@@ -1,0 +1,140 @@
+---
+config:
+  layout: elk
+---
+flowchart TB
+    subgraph boundary["`**npd-loader CLI** [Container]`"]
+        npd_loader_catalog["`**catalog**
+[Component]
+SqlCatalog on SQLAlchemy Core over
+MASTER_WAREHOUSE_RUN / DATA_FILE
+(both engines)`"]
+        npd_loader_cli["`**cli**
+[Component]
+Entry point: parses commands,
+builds the stage Context (dialect,
+catalog, storage, HTTP client),
+maps outcomes to exit codes`"]
+        npd_loader_config["`**config**
+[Component]
+Parses config.toml into typed
+sections; rejects legacy
+host/user/password keys`"]
+        npd_loader_connections["`**connections**
+[Component]
+Reads the DataEngine database.env
+and builds SqlConnectionObject /
+PgConnectionObject by name`"]
+        npd_loader_dialect["`**dialect**
+[Component]
+Engine-specific operations behind
+one protocol: init-db, raw load,
+transforms, publish, retention
+drops, run lock, orphan cleanup
+(mssql.py, postgres.py)`"]
+        npd_loader_download["`**download**
+[Component]
+DOWNLOAD stage: manifest, signed-
+URL fetch with retries, sha256,
+data_file rows`"]
+        npd_loader_extract["`**extract**
+[Component]
+EXTRACT stage: .zst -› .ndjson,
+restores deleted files in place`"]
+        npd_loader_import_stage["`**import_stage**
+[Component]
+IMPORT stage: finds inputs, drops
+orphans, raw load -› transforms -›
+publish, marks files loaded`"]
+        npd_loader_manifest["`**manifest**
+[Component]
+Parses manifest.json and maps file
+names to FHIR resource types`"]
+        npd_loader_profile["`**profile**
+[Component]
+'profile' command: lists JSON
+paths in a release file and flags
+unmapped ones`"]
+        npd_loader_raw_load["`**raw_load**
+[Component]
+Shared NDJSON line reader and
+validator (JSON object,
+resourceType, id, lastUpdated)`"]
+        npd_loader_retention["`**retention**
+[Component]
+Keeps the newest keep_releases
+published releases; drops older
+partitions and their .ndjson files`"]
+        npd_loader_runxml["`**runxml**
+[Component]
+Builds xml_config / xml_output for
+catalog runs`"]
+        npd_loader_sqltext["`**sqltext**
+[Component]
+SQL token rendering, GO batch
+splitting, standalone table names,
+packaged SQL scripts`"]
+        npd_loader_stages["`**stages**
+[Component]
+Shared stage plumbing: Context,
+run lock hook, run folders,
+failure recording, closing
+interrupted runs`"]
+        npd_loader_storage["`**storage**
+[Component]
+LocalStorage: atomic writes,
+reads, sizes and deletes under the
+storage root`"]
+    end
+    npd_loader_catalog --> npd_loader_config
+    npd_loader_catalog --> npd_loader_runxml
+    npd_loader_cli --> npd_loader_connections
+    npd_loader_cli --> npd_loader_download
+    npd_loader_cli --> npd_loader_import_stage
+    npd_loader_cli --> npd_loader_profile
+    npd_loader_connections --> npd_loader_config
+    npd_loader_dialect --> npd_loader_config
+    npd_loader_dialect --> npd_loader_raw_load
+    npd_loader_dialect --> npd_loader_sqltext
+    npd_loader_dialect --> npd_loader_storage
+    npd_loader_download --> npd_loader_manifest
+    npd_loader_download --> npd_loader_stages
+    npd_loader_extract --> npd_loader_manifest
+    npd_loader_extract --> npd_loader_stages
+    npd_loader_import_stage --> npd_loader_extract
+    npd_loader_import_stage --> npd_loader_retention
+    npd_loader_retention --> npd_loader_stages
+    npd_loader_stages --> npd_loader_catalog
+    npd_loader_stages --> npd_loader_dialect
+    db_postgresql[("`**npd database (Postgres flavor)**
+[Container: PostgreSQL 16]
+Alternative flavor selected by a
+type: postgres connection; same
+schema with JSONB raw layer and
+list partitions (ported to
+DataEngine, not yet verified
+against a server)`")]
+    npd_loader_dialect -->|"`Same stages via COPY and
+ATTACH PARTITION (Postgres
+flavor)
+[psycopg2 (PgConnectionObject)]`"| db_postgresql
+    db_sql_server[("`**npd database**
+[Container: SQL Server 2019 (cssnpi: npd / npd_dev / npd_test)]
+npd_raw.resource (raw FHIR JSON,
+varchar(max) UTF-8) and 26 npd.*
+tables, partitioned by
+release_date; npd.release; v_*
+views`")]
+    npd_loader_dialect -->|"`Bulk-loads raw JSON, runs
+T-SQL transforms, publishes
+by partition SWITCH
+[pyodbc (SqlConnectionObject)]`"| db_sql_server
+    classDef person fill:#08427b,stroke:#052e56,color:#ffffff
+    classDef container fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef system fill:#1168bd,stroke:#0b4884,color:#ffffff
+    classDef component fill:#85bbf0,stroke:#5d82a8,color:#000000
+    classDef external fill:#999999,stroke:#6b6b6b,color:#ffffff
+    classDef shared fill:#dbe9f6,stroke:#5d82a8,color:#000000,stroke-dasharray:4 3
+    class npd_loader_catalog,npd_loader_cli,npd_loader_config,npd_loader_connections,npd_loader_dialect,npd_loader_download,npd_loader_extract,npd_loader_import_stage,npd_loader_manifest,npd_loader_profile,npd_loader_raw_load,npd_loader_retention,npd_loader_runxml,npd_loader_sqltext,npd_loader_stages,npd_loader_storage component
+    class db_postgresql,db_sql_server container
+    style boundary fill:none,stroke:#444444,stroke-dasharray:6 4

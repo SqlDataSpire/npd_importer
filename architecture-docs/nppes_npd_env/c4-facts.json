@@ -1,0 +1,220 @@
+{
+  "repository": "nppes_npd_env",
+  "containers": [
+    {
+      "id": "npd-loader",
+      "name": "npd-loader",
+      "kind": "cli",
+      "technology": "Python, CLI",
+      "path": ".",
+      "evidence": [
+        "pyproject.toml: CLI"
+      ],
+      "components": {
+        "nodes": {
+          "npd_loader.catalog": {
+            "path": "src/npd_loader/catalog.py",
+            "group": "src"
+          },
+          "npd_loader.cli": {
+            "path": "src/npd_loader/cli.py",
+            "group": "src"
+          },
+          "npd_loader.config": {
+            "path": "src/npd_loader/config.py",
+            "group": "src"
+          },
+          "npd_loader.connections": {
+            "path": "src/npd_loader/connections.py",
+            "group": "src"
+          },
+          "npd_loader.dialect": {
+            "path": "src/npd_loader/dialect",
+            "group": "src"
+          },
+          "npd_loader.download": {
+            "path": "src/npd_loader/download.py",
+            "group": "src"
+          },
+          "npd_loader.extract": {
+            "path": "src/npd_loader/extract.py",
+            "group": "src"
+          },
+          "npd_loader.import_stage": {
+            "path": "src/npd_loader/import_stage.py",
+            "group": "src"
+          },
+          "npd_loader.manifest": {
+            "path": "src/npd_loader/manifest.py",
+            "group": "src"
+          },
+          "npd_loader.profile": {
+            "path": "src/npd_loader/profile.py",
+            "group": "src"
+          },
+          "npd_loader.raw_load": {
+            "path": "src/npd_loader/raw_load.py",
+            "group": "src"
+          },
+          "npd_loader.retention": {
+            "path": "src/npd_loader/retention.py",
+            "group": "src"
+          },
+          "npd_loader.runxml": {
+            "path": "src/npd_loader/runxml.py",
+            "group": "src"
+          },
+          "npd_loader.sqltext": {
+            "path": "src/npd_loader/sqltext.py",
+            "group": "src"
+          },
+          "npd_loader.stages": {
+            "path": "src/npd_loader/stages.py",
+            "group": "src"
+          },
+          "npd_loader.storage": {
+            "path": "src/npd_loader/storage.py",
+            "group": "src"
+          }
+        },
+        "edges": {
+          "npd_loader.catalog": [
+            "npd_loader.config",
+            "npd_loader.runxml"
+          ],
+          "npd_loader.cli": [
+            "npd_loader.catalog",
+            "npd_loader.config",
+            "npd_loader.connections",
+            "npd_loader.dialect",
+            "npd_loader.download",
+            "npd_loader.extract",
+            "npd_loader.import_stage",
+            "npd_loader.profile",
+            "npd_loader.stages",
+            "npd_loader.storage"
+          ],
+          "npd_loader.config": [],
+          "npd_loader.connections": [
+            "npd_loader.config"
+          ],
+          "npd_loader.dialect": [
+            "npd_loader.config",
+            "npd_loader.raw_load",
+            "npd_loader.sqltext",
+            "npd_loader.storage"
+          ],
+          "npd_loader.download": [
+            "npd_loader.catalog",
+            "npd_loader.manifest",
+            "npd_loader.runxml",
+            "npd_loader.stages"
+          ],
+          "npd_loader.extract": [
+            "npd_loader.catalog",
+            "npd_loader.manifest",
+            "npd_loader.runxml",
+            "npd_loader.stages",
+            "npd_loader.storage"
+          ],
+          "npd_loader.import_stage": [
+            "npd_loader.catalog",
+            "npd_loader.dialect",
+            "npd_loader.extract",
+            "npd_loader.manifest",
+            "npd_loader.raw_load",
+            "npd_loader.retention",
+            "npd_loader.runxml",
+            "npd_loader.stages"
+          ],
+          "npd_loader.manifest": [],
+          "npd_loader.profile": [],
+          "npd_loader.raw_load": [],
+          "npd_loader.retention": [
+            "npd_loader.dialect",
+            "npd_loader.stages"
+          ],
+          "npd_loader.runxml": [],
+          "npd_loader.sqltext": [],
+          "npd_loader.stages": [
+            "npd_loader.catalog",
+            "npd_loader.config",
+            "npd_loader.dialect",
+            "npd_loader.runxml",
+            "npd_loader.storage"
+          ],
+          "npd_loader.storage": []
+        }
+      },
+      "code_components": null,
+      "inventory": [
+        "Python >=3.12",
+        "Python-DataEngine>=2.4",
+        "zstandard>=0.22",
+        "httpx>=0.27"
+      ],
+      "compose_services": null
+    }
+  ],
+  "data_stores": [
+    {
+      "id": "db-postgresql",
+      "name": "PostgreSQL",
+      "technology": "PostgreSQL",
+      "evidence": [
+        "src/npd_loader/dialect/postgres.py:21"
+      ],
+      "used_by": [
+        "npd-loader"
+      ],
+      "used_by_components": {
+        "npd-loader": [
+          "npd_loader.dialect"
+        ]
+      },
+      "used_by_code": {}
+    },
+    {
+      "id": "db-sql-server",
+      "name": "SQL Server",
+      "technology": "SQL Server",
+      "evidence": [
+        "src/npd_loader/dialect/mssql.py:10"
+      ],
+      "used_by": [
+        "npd-loader"
+      ],
+      "used_by_components": {
+        "npd-loader": [
+          "npd_loader.dialect"
+        ]
+      },
+      "used_by_code": {}
+    }
+  ],
+  "external_systems": [],
+  "relationships": [],
+  "endpoints": [],
+  "deployment": {
+    "compose": [],
+    "dockerfiles": [],
+    "kubernetes": [],
+    "ci": [],
+    "platforms": []
+  },
+  "configuration": {
+    "variables": [
+      {
+        "name": "NPD_LOADER_CONFIG",
+        "default": null,
+        "sources": [
+          "src/npd_loader/cli.py:29"
+        ],
+        "containers": [
+          "npd-loader"
+        ]
+      }
+    ],
+    "files": []
+  }
+}

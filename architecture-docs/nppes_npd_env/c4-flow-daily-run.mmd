@@ -1,0 +1,23 @@
+sequenceDiagram
+    participant task_scheduler as Windows Task Scheduler
+    participant npd_loader_cli as npd_loader.cli
+    participant npd_loader_download as npd_loader.download
+    participant cms_npd as CMS National Provider Directory downloads
+    participant file_storage as Release file store
+    participant catalog_db as Warehouse catalog
+    participant npd_loader_import_stage as npd_loader.import_stage
+    participant npd_loader_extract as npd_loader.extract
+    participant npd_loader_dialect as npd_loader.dialect
+    participant db_sql_server as npd database
+    participant npd_loader_retention as npd_loader.retention
+    task_scheduler->>npd_loader_cli: npd-loader --config ... run [npd-loader-run.cmd]
+    npd_loader_cli->>npd_loader_download: run_download(ctx)
+    npd_loader_download->>cms_npd: GET manifest.json, then each .ndjson.zst via signed URL [HTTPS]
+    npd_loader_download->>file_storage: Writes files into run_‹id›_‹timestamp›/
+    npd_loader_download->>catalog_db: DOWNLOAD run + manifest/.zst DATA_FILE rows [SQLAlchemy Core]
+    npd_loader_cli->>npd_loader_import_stage: run_import(ctx)
+    npd_loader_import_stage->>npd_loader_extract: Extracts missing .ndjson (EXTRACT run)
+    npd_loader_import_stage->>npd_loader_dialect: load_raw -› run_transforms -› publish
+    npd_loader_dialect->>db_sql_server: Raw batches (5,000 rows, committed each), parse-once T-SQL transforms, SPLIT + SWITCH publish in one transaction [pyodbc]
+    npd_loader_import_stage->>npd_loader_retention: apply_retention (keep_releases)
+    npd_loader_import_stage->>catalog_db: IMPORT run Success + per-table row counts#59; DATE_LOADED on .ndjson rows [SQLAlchemy Core]
