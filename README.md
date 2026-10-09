@@ -3,9 +3,18 @@
 Loads the CMS National Provider Directory FHIR bulk release into SQL Server 2019+
 (`https://directory.cms.gov/downloads/`) as one current dataset: flattened tables in `npd` (with `v_*` views), updated
 in place by each release. Every run and file is recorded in the catalog (`HIE_WAREHOUSE_META`; `dbo.MASTER_WAREHOUSE_RUN`,
-`dbo.DATA_FILE`). SQL Server only: the earlier Postgres loader (raw JSONB, one partition per release) is on the `main`
-branch.
+`dbo.DATA_FILE`). SQL Server only; see [Project history](#project-history) for the Postgres loader.
 Design: `docs/superpowers/specs/2026-10-06-phase2-python-flatten-upsert-design.md`.
+
+## Project history
+
+This repository is a separate fork of [checkbook-org/npd_fhir_loader](https://github.com/checkbook-org/npd_fhir_loader),
+where the project started. Go there if you want:
+
+1. **The evolution of the project**: the original design and the commits before this fork. The fork starts from that
+   repository's `main` at `e61e895`; the documents under `docs/` (specs, plans, profiles) cover the steps since.
+2. **A Postgres deployment**: the original loader keeps raw JSONB in Postgres, one partition per release, and builds the
+   flattened tables with SQL. This fork removed Postgres support.
 
 ## SQL Server (Windows)
 
